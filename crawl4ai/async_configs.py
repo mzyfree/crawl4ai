@@ -414,6 +414,10 @@ class BrowserConfig:
         text_mode (bool): If True, disables images and other rich content for potentially faster load times.
                           Default: False.
         light_mode (bool): Disables certain background features for performance gains. Default: False.
+        block_css (bool): If True, blocks all CSS requests for faster loading and less memory usage.
+                          Default: True.
+        block_ads (bool): If True, blocks known ad and tracking domains.
+                          Default: True.
         extra_args (list): Additional command-line arguments passed to the browser.
                            Default: [].
         enable_stealth (bool): If True, applies playwright-stealth to bypass basic bot detection.
@@ -455,6 +459,8 @@ class BrowserConfig:
         user_agent_generator_config: dict = {},
         text_mode: bool = False,
         light_mode: bool = False,
+        block_css: bool = True,
+        block_ads: bool = True,
         extra_args: list = None,
         debugging_port: int = 9222,
         host: str = "localhost",
@@ -508,6 +514,8 @@ class BrowserConfig:
         self.user_agent_generator_config = user_agent_generator_config
         self.text_mode = text_mode
         self.light_mode = light_mode
+        self.block_css = block_css
+        self.block_ads = block_ads
         self.extra_args = extra_args if extra_args is not None else []
         self.sleep_on_close = sleep_on_close
         self.verbose = verbose
@@ -1085,6 +1093,10 @@ class CrawlerRunConfig():
                     Default: False.
         image_description_min_word_threshold (int): Minimum words for image description extraction.
                                                     Default: IMAGE_DESCRIPTION_MIN_WORD_THRESHOLD (e.g., 50).
+        block_css (bool): If True, blocks all CSS requests for this crawl.
+                          Default: True.
+        block_ads (bool): If True, blocks known ad and tracking domains for this crawl.
+                          Default: True.
         image_score_threshold (int): Minimum score threshold for processing an image.
                                      Default: IMAGE_SCORE_THRESHOLD (e.g., 3).
         exclude_external_images (bool): If True, exclude all external images from processing.
@@ -1224,6 +1236,8 @@ class CrawlerRunConfig():
         capture_mhtml: bool = False,
         image_description_min_word_threshold: int = IMAGE_DESCRIPTION_MIN_WORD_THRESHOLD,
         image_score_threshold: int = IMAGE_SCORE_THRESHOLD,
+        block_css: bool = True,
+        block_ads: bool = True,
         table_score_threshold: int = 7,
         table_extraction: TableExtractionStrategy = None,
         exclude_external_images: bool = False,
@@ -1340,6 +1354,8 @@ class CrawlerRunConfig():
         self.capture_mhtml = capture_mhtml
         self.image_description_min_word_threshold = image_description_min_word_threshold
         self.image_score_threshold = image_score_threshold
+        self.block_css = block_css
+        self.block_ads = block_ads
         self.exclude_external_images = exclude_external_images
         self.exclude_all_images = exclude_all_images
         self.table_score_threshold = table_score_threshold

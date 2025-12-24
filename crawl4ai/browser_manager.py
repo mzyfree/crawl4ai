@@ -896,8 +896,6 @@ class BrowserManager:
             "ttf",
             "otf",
             "eot",
-            # Styles
-            # 'css', 'less', 'scss', 'sass',
             # Media
             "mp4",
             "webm",
@@ -931,6 +929,38 @@ class BrowserManager:
             "xml",
             "swf",
             "wasm",
+        ]
+
+        # Determine blocking flags from config or run config
+        # Default behavior: use self.config settings, or True if not specified
+        should_block_css = getattr(self.config, 'block_css', True)
+        should_block_ads = getattr(self.config, 'block_ads', True)
+
+        # Allow crawlerRunConfig to override
+        if crawlerRunConfig:
+            if hasattr(crawlerRunConfig, 'block_css') and crawlerRunConfig.block_css is not None:
+                should_block_css = crawlerRunConfig.block_css
+            if hasattr(crawlerRunConfig, 'block_ads') and crawlerRunConfig.block_ads is not None:
+                should_block_ads = crawlerRunConfig.block_ads
+
+        if should_block_css:
+            blocked_extensions.extend(["css", "less", "scss", "sass"])
+
+        blocked_domains = [
+            "google-analytics.com",
+            "doubleclick.net",
+            "googlesyndication.com",
+            "googletagservices.com",
+            "googletagmanager.com",
+            "facebook.net",
+            "fbcdn.net",
+            "amazon-adsystem.com",
+            "adnxs.com",
+            "ads-twitter.com",
+            "mixpanel.com",
+            "segment.io",
+            "analytics.google.com",
+            "adservice.google.com"
         ]
 
         # Common context settings
@@ -986,11 +1016,26 @@ class BrowserManager:
         # Create and return the context with all settings
         context = await self.browser.new_context(**context_settings)
 
-        # Apply text mode settings if enabled
-        if self.config.text_mode:
+        # Apply blocking rules
+        if self.config.text_mode or should_block_css or should_block_ads:
+            # If text_mode is on, we block the standard list
+            # If only block_css is on, we only block css (which is now in blocked_extensions if should_block_css is True)
+            
             # Create and apply route patterns for each extension
-            for ext in blocked_extensions:
+            # If text_mode is OFF but should_block_css is ON, we only want to block CSS extensions
+            effective_blocked_extensions = []
+            if self.config.text_mode:
+                effective_blocked_extensions = blocked_extensions
+            elif should_block_css:
+                effective_blocked_extensions = ["css", "less", "scss", "sass"]
+
+            for ext in effective_blocked_extensions:
                 await context.route(f"**/*.{ext}", lambda route: route.abort())
+            
+            # Create and apply route patterns for each blocked domain
+            if should_block_ads:
+                for domain in blocked_domains:
+                    await context.route(f"**/*{domain}*/**", lambda route: route.abort())
         return context
 
     def _make_config_signature(self, crawlerRunConfig: CrawlerRunConfig) -> str:
@@ -1013,7 +1058,9 @@ class BrowserManager:
             "cache_mode",
             "content_filter",
             "semaphore_count",
-            "url"
+            "url",
+            # Ensure block_css and block_ads are NOT in ephemeral_keys 
+            # so they DO affect the signature and trigger a new context.
         ]
         
         # Do NOT exclude locale, timezone_id, or geolocation as these DO affect browser context
