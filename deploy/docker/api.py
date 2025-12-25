@@ -31,8 +31,20 @@ from crawl4ai.content_filter_strategy import (
     BM25ContentFilter,
     LLMContentFilter
 )
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator, MarkdownGenerationStrategy
+from crawl4ai.models import MarkdownGenerationResult
 from crawl4ai.content_scraping_strategy import LXMLWebScrapingStrategy
+
+# 🚀 极致性能优化：定义一个不执行任何转换的 Markdown 生成器
+class NoMarkdownGenerator(MarkdownGenerationStrategy):
+    def generate_markdown(self, input_html: str, **kwargs) -> MarkdownGenerationResult:
+        return MarkdownGenerationResult(
+            raw_markdown="",
+            markdown_with_citations="",
+            references_markdown="",
+            fit_markdown="",
+            fit_html=""
+        )
 
 from utils import (
     TaskStatus,
@@ -518,7 +530,8 @@ async def handle_crawl_request(
     browser_config: dict,
     crawler_config: dict,
     config: dict,
-    hooks_config: Optional[dict] = None
+    hooks_config: Optional[dict] = None,
+    only_html: bool = False
 ) -> dict:
     """Handle non-streaming crawl requests with optional hooks."""
     # Track request start
@@ -541,6 +554,13 @@ async def handle_crawl_request(
         urls = [('https://' + url) if not url.startswith(('http://', 'https://')) and not url.startswith(("raw:", "raw://")) else url for url in urls]
         browser_config = BrowserConfig.load(browser_config)
         crawler_config = CrawlerRunConfig.load(crawler_config)
+
+        # 🚀 极致性能优化：将 only_html 标志位传递给爬虫引擎
+        crawler_config.only_html = only_html
+
+        # 🚀 极致性能优化：如果 only_html 为 True，使用空生成器彻底禁用 Markdown 转换
+        if only_html:
+            crawler_config.markdown_generator = NoMarkdownGenerator()
 
         dispatcher = MemoryAdaptiveDispatcher(
             memory_threshold_percent=config["crawler"]["memory_threshold_percent"],

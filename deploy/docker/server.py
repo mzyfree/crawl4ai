@@ -122,7 +122,7 @@ async def lifespan(_: FastAPI):
     monitor_module.monitor_stats.start_persistence_worker()
 
     # Initialize browser pool
-    use_permanent = config.get("crawler", {}).get("pool", {}).get("use_permanent", True)
+    use_permanent = config.get("crawler", {}).get("pool", {}).get("use_permanent", False)
     if use_permanent:
         await init_permanent(BrowserConfig(
             extra_args=config["crawler"]["browser"].get("extra_args", []),
@@ -622,7 +622,8 @@ async def crawl(
         browser_config=crawl_request.browser_config,
         crawler_config=crawl_request.crawler_config,
         config=config,
-        hooks_config=hooks_config
+        hooks_config=hooks_config,
+        only_html=crawl_request.only_html
     )
     # check if all of the results are not successful
     if all(not result["success"] for result in results["results"]):

@@ -8,6 +8,7 @@ class CrawlRequest(BaseModel):
     urls: List[str] = Field(min_length=1, max_length=100)
     browser_config: Optional[Dict] = Field(default_factory=dict)
     crawler_config: Optional[Dict] = Field(default_factory=dict)
+    only_html: bool = Field(default=False, description="If true, returns raw HTML without extraction or processing")
 
 
 class HookConfig(BaseModel):

@@ -61,8 +61,8 @@ crawler:
     batch_process: 300.0  # Timeout for batch processing
   pool:
     max_pages: 40                          # ← GLOBAL_SEM permits
-    idle_ttl_sec: 300                     # ← 30 min janitor cutoff
-    use_permanent: true                   # ← Toggle permanent browser instance
+    idle_ttl_sec: 300                     # ← 30 min janitor cutoff
+    use_permanent: false                  # ← Toggle permanent browser instance
   browser:
     kwargs:
       headless: true

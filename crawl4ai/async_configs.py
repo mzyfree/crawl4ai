@@ -1264,6 +1264,7 @@ class CrawlerRunConfig():
         user_agent: str = None,
         user_agent_mode: str = None,
         user_agent_generator_config: dict = {},
+        only_html: bool = False,
         # Deep Crawl Parameters
         deep_crawl_strategy: Optional[DeepCrawlStrategy] = None,
         # Link Extraction Parameters
@@ -1396,6 +1397,7 @@ class CrawlerRunConfig():
         self.user_agent = user_agent
         self.user_agent_mode = user_agent_mode
         self.user_agent_generator_config = user_agent_generator_config
+        self.only_html = only_html
 
         # Validate type of extraction strategy and chunking strategy if they are provided
         if self.extraction_strategy is not None and not isinstance(
@@ -1663,6 +1665,7 @@ class CrawlerRunConfig():
             user_agent=kwargs.get("user_agent"),
             user_agent_mode=kwargs.get("user_agent_mode"),
             user_agent_generator_config=kwargs.get("user_agent_generator_config", {}),
+            only_html=kwargs.get("only_html", False),
             # Deep Crawl Parameters
             deep_crawl_strategy=kwargs.get("deep_crawl_strategy"),
             # Link Extraction Parameters
@@ -1767,6 +1770,7 @@ class CrawlerRunConfig():
             "user_agent": self.user_agent,
             "user_agent_mode": self.user_agent_mode,
             "user_agent_generator_config": self.user_agent_generator_config,
+            "only_html": self.only_html,
             "deep_crawl_strategy": self.deep_crawl_strategy,
             "link_preview_config": self.link_preview_config.to_dict() if self.link_preview_config else None,
             "url": self.url,

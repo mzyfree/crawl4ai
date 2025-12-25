@@ -445,20 +445,21 @@ class AsyncWebCrawler:
     ) -> CrawlResult:
         """
         Process HTML content using the provided configuration.
-
-        Args:
-            url: The URL being processed
-            html: Raw HTML content
-            extracted_content: Previously extracted content (if any)
-            config: Configuration object controlling processing behavior
-            screenshot_data: Screenshot data (if any)
-            pdf_data: PDF data (if any)
-            verbose: Whether to enable verbose logging
-            **kwargs: Additional parameters for backwards compatibility
-
-        Returns:
-            CrawlResult: Processed result containing extracted and formatted content
         """
+        if getattr(config, 'only_html', False):
+            return CrawlResult(
+                url=url,
+                html=html,
+                cleaned_html=html,
+                success=True,
+                status_code=kwargs.get("status_code", 200),
+                screenshot=screenshot_data,
+                pdf=pdf_data,
+                metadata={},
+                media={},
+                links={}
+            )
+
         cleaned_html = ""
         try:
             _url = url if not kwargs.get("is_raw_html", False) else "Raw HTML"
