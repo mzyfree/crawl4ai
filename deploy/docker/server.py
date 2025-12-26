@@ -30,6 +30,7 @@ from schemas import (
     HTMLRequest,
     ScreenshotRequest,
     PDFRequest,
+    PDFCrawlRequest,
     JSEndpointRequest,
 )
 
@@ -122,7 +123,7 @@ async def lifespan(_: FastAPI):
     monitor_module.monitor_stats.start_persistence_worker()
 
     # Initialize browser pool
-    use_permanent = config.get("crawler", {}).get("pool", {}).get("use_permanent", True)
+    use_permanent = config.get("crawler", {}).get("pool", {}).get("use_permanent", False)
     if use_permanent:
         await init_permanent(BrowserConfig(
             extra_args=config["crawler"]["browser"].get("extra_args", []),
@@ -422,6 +423,99 @@ async def generate_pdf(
             return {"success": True, "path": abs_path}
         return {"success": True, "pdf": base64.b64encode(pdf_data).decode()}
     except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/crawl/pdf")
+@limiter.limit(config["rate_limiting"]["default_limit"])
+@mcp_tool("crawl_pdf")
+async def crawl_pdf(
+    request: Request,
+    body: PDFCrawlRequest,
+    _td: Dict = Depends(token_dep),
+):
+    """
+    Extract content from a list of PDF file URLs. 
+    Use this when the target URLs are PDF files and you want their text/markdown content.
+    """
+    from crawl4ai.processors.pdf import PDFCrawlerStrategy, PDFContentScrapingStrategy
+    from api import b64encode
+    import time
+    from bs4 import BeautifulSoup
+    from fastapi.encoders import jsonable_encoder
+    
+    start_time = time.time()
+    try:
+        # 1. Setup strategies
+        crawler_strategy = PDFCrawlerStrategy()
+        scraping_strategy = PDFContentScrapingStrategy()
+        
+        # 2. Setup config
+        run_cfg = CrawlerRunConfig(
+            scraping_strategy=scraping_strategy,
+            **body.crawler_config
+        )
+        
+        # 3. Handle max_pages
+        scraping_params = {"max_pages": body.max_pages}
+        
+        # 4. Initialize crawler
+        async with AsyncWebCrawler(crawler_strategy=crawler_strategy) as crawler:
+            # Use arun_many for multiple URLs or arun for a single URL
+            if len(body.urls) == 1:
+                res = await crawler.arun(
+                    url=body.urls[0], 
+                    config=run_cfg,
+                    **scraping_params
+                )
+                # arun returns a container, we want its inner results list
+                results = res
+            else:
+                # arun_many also returns a container
+                results = await crawler.arun_many(
+                    urls=body.urls,
+                    config=run_cfg,
+                    **scraping_params
+                )
+            
+            # 5. Process results
+            processed_results = []
+            for result in results:
+                # results is an iterable of CrawlResult objects
+                # Use jsonable_encoder to handle datetime and other non-serializable objects
+                res_dict = jsonable_encoder(result.model_dump())
+                
+                # For PDF crawls, the real content is in cleaned_html and markdown.
+                # html often contains a placeholder "Scraper will handle the real work".
+                # We sync html with cleaned_html to ensure consistency for downstream users.
+                if res_dict.get('cleaned_html') and ('Scraper will handle' in str(res_dict.get('html', ''))):
+                    res_dict['html'] = res_dict['cleaned_html']
+
+                # 增强：为 gwcs 提取纯 text 格式
+                # 优先从 cleaned_html (即解析后的 PDF 内容) 提取
+                target_html = res_dict.get('cleaned_html') or res_dict.get('html')
+                if target_html and 'Scraper will handle' not in str(target_html):
+                    soup = BeautifulSoup(target_html, 'html.parser')
+                    res_dict['text'] = soup.get_text(separator='\n\n').strip()
+                else:
+                    # fallback to markdown or empty
+                    res_dict['text'] = res_dict.get('markdown', '')
+
+                # If PDF exists, encode it to base64
+                if res_dict.get('pdf') is not None and isinstance(res_dict.get('pdf'), bytes):
+                    res_dict['pdf'] = b64encode(res_dict['pdf']).decode('utf-8')
+                
+                processed_results.append(res_dict)
+            
+            end_time = time.time()
+            return JSONResponse({
+                "success": True,
+                "results": processed_results,
+                "server_processing_time_s": end_time - start_time
+            })
+            
+    except Exception as e:
+        logger.error(f"PDF Crawl Error: {str(e)}")
         raise HTTPException(500, detail=str(e))
 
 

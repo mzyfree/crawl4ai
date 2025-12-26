@@ -72,7 +72,7 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
         self.batch_size = batch_size
         self._temp_dir = None
 
-    def process(self, pdf_path: Path) -> PDFProcessResult:
+    def process(self, pdf_path: Path, max_pages: Optional[int] = None) -> PDFProcessResult:
         # Import inside method to allow dependency to be optional
         try:
             from pypdf import PdfReader
@@ -101,7 +101,11 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
                         self._temp_dir = tempfile.mkdtemp(prefix='pdf_images_')
                         image_dir = Path(self._temp_dir)
 
-                for page_num, page in enumerate(reader.pages):
+                pages_to_process = reader.pages
+                if max_pages is not None:
+                    pages_to_process = pages_to_process[:max_pages]
+
+                for page_num, page in enumerate(pages_to_process):
                     self.current_page_number = page_num + 1
                     pdf_page = self._process_page(page, image_dir)
                     result.pages.append(pdf_page)
@@ -121,7 +125,7 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
         result.processing_time = time() - start_time
         return result
 
-    def process_batch(self, pdf_path: Path) -> PDFProcessResult:
+    def process_batch(self, pdf_path: Path, max_pages: Optional[int] = None) -> PDFProcessResult:
         """Like process() but processes PDF pages in parallel batches"""
         # Import inside method to allow dependency to be optional
         try:
@@ -150,6 +154,8 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
                 reader = PdfReader(file)
                 result.metadata = self._extract_metadata(pdf_path, reader)
                 total_pages = len(reader.pages)
+                if max_pages is not None:
+                    total_pages = min(total_pages, max_pages)
 
             # Handle image directory setup
             image_dir = None
@@ -178,10 +184,10 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
 
                 # Collect results in order
                 result.pages = [None] * total_pages
-                for page_num, future in futures:
+                for i, (page_num, future) in enumerate(futures):
                     try:
                         pdf_page = future.result()
-                        result.pages[page_num - 1] = pdf_page
+                        result.pages[i] = pdf_page
                     except Exception as e:
                         logger.error(f"Failed to process page {page_num}: {str(e)}")
                         raise

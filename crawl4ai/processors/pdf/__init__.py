@@ -82,10 +82,11 @@ class PDFContentScrapingStrategy(ContentScrapingStrategy):
         """
         # Download if URL or use local path
         pdf_path = self._get_pdf_path(url)
+        max_pages = params.get("max_pages")
         try:
             # Process PDF
             # result = self.pdf_processor.process(Path(pdf_path))
-            result = self.pdf_processor.process_batch(Path(pdf_path))
+            result = self.pdf_processor.process_batch(Path(pdf_path), max_pages=max_pages)
             
             # Combine page HTML
             cleaned_html = f"""
@@ -153,7 +154,10 @@ class PDFContentScrapingStrategy(ContentScrapingStrategy):
                 
                 # Download PDF with streaming and timeout
                 # Connection timeout: 10s, Read timeout: 300s (5 minutes for large PDFs)
-                response = requests.get(url, stream=True, timeout=(20, 60 * 10))
+                # verify=False to bypass SSL issues in restricted environments (e.g. Docker)
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                response = requests.get(url, stream=True, timeout=(20, 60 * 10), verify=False)
                 response.raise_for_status()
                 
                 # Get file size if available

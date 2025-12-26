@@ -4,20 +4,28 @@ FROM docker-registry.int.rclabenv.com:443/ai/c4ai:25.4.4
 # 切换到 root 用户以进行文件替换
 USER root
 
-# 1. 覆盖 API 启动脚本和配置 (位于 /app)
+# 1. 覆盖 API 启动脚本、配置和逻辑
 COPY deploy/docker/server.py /app/server.py
+COPY deploy/docker/api.py /app/api.py
+COPY deploy/docker/schemas.py /app/schemas.py
 COPY deploy/docker/config.yml /app/config.yml
 
-# 2. 覆盖核心库文件 (实现 CSS 拦截和追踪器过滤)
-# 注意：在官方 Python 镜像中，包通常安装在以下路径
+# 2. 覆盖核心库文件 (实现 CSS/广告拦截、PDF 支持及参数定义)
 COPY crawl4ai/browser_manager.py /usr/local/lib/python3.12/site-packages/crawl4ai/browser_manager.py
+COPY crawl4ai/async_configs.py /usr/local/lib/python3.12/site-packages/crawl4ai/async_configs.py
+COPY crawl4ai/__init__.py /usr/local/lib/python3.12/site-packages/crawl4ai/__init__.py
+COPY crawl4ai/processors/pdf/processor.py /usr/local/lib/python3.12/site-packages/crawl4ai/processors/pdf/processor.py
+COPY crawl4ai/processors/pdf/__init__.py /usr/local/lib/python3.12/site-packages/crawl4ai/processors/pdf/__init__.py
+
+# 安装 PDF 物理依赖
+RUN pip install pypdf
 
 # 确保所有权正确，防止权限问题
-RUN chown appuser:appuser /app/server.py /app/config.yml /usr/local/lib/python3.12/site-packages/crawl4ai/browser_manager.py
+RUN chown -R appuser:appuser /app/server.py /app/api.py /app/schemas.py /app/config.yml \
+    /usr/local/lib/python3.12/site-packages/crawl4ai/
 
 # 切换回非 root 用户
 USER appuser
 
 # 保持原有的启动命令
 CMD ["supervisord", "-c", "supervisord.conf"]
-

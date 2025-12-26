@@ -62,7 +62,7 @@ crawler:
   pool:
     max_pages: 40                          # ← GLOBAL_SEM permits
     idle_ttl_sec: 300                     # ← 30 min janitor cutoff
-    use_permanent: true                   # ← Toggle permanent browser instance
+    use_permanent: false                  # ← Disabled to save memory by default
   browser:
     kwargs:
       headless: true

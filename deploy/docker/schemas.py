@@ -78,6 +78,14 @@ class ScreenshotRequest(BaseModel):
 class PDFRequest(BaseModel):
     url: str
     output_path: Optional[str] = None
+    max_pages: Optional[int] = None
+
+
+class PDFCrawlRequest(BaseModel):
+    urls: List[str] = Field(min_length=1, max_length=100)
+    max_pages: Optional[int] = None
+    browser_config: Optional[Dict] = Field(default_factory=dict)
+    crawler_config: Optional[Dict] = Field(default_factory=dict)
 
 
 class JSEndpointRequest(BaseModel):
