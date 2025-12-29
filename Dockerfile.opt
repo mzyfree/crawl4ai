@@ -13,6 +13,8 @@ COPY deploy/docker/config.yml /app/config.yml
 # 2. 覆盖核心库文件 (实现 CSS/广告拦截、PDF 支持及参数定义)
 COPY crawl4ai/browser_manager.py /usr/local/lib/python3.12/site-packages/crawl4ai/browser_manager.py
 COPY crawl4ai/async_configs.py /usr/local/lib/python3.12/site-packages/crawl4ai/async_configs.py
+COPY crawl4ai/async_webcrawler.py /usr/local/lib/python3.12/site-packages/crawl4ai/async_webcrawler.py
+COPY crawl4ai/async_crawler_strategy.py /usr/local/lib/python3.12/site-packages/crawl4ai/async_crawler_strategy.py
 COPY crawl4ai/__init__.py /usr/local/lib/python3.12/site-packages/crawl4ai/__init__.py
 COPY crawl4ai/processors/pdf/processor.py /usr/local/lib/python3.12/site-packages/crawl4ai/processors/pdf/processor.py
 COPY crawl4ai/processors/pdf/__init__.py /usr/local/lib/python3.12/site-packages/crawl4ai/processors/pdf/__init__.py

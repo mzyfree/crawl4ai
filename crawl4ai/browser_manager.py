@@ -960,7 +960,10 @@ class BrowserManager:
             "mixpanel.com",
             "segment.io",
             "analytics.google.com",
-            "adservice.google.com"
+            "adservice.google.com",
+            "adservice.com",
+            "adsystem.com",
+            "facebook.com"
         ]
 
         # Common context settings
@@ -1034,8 +1037,15 @@ class BrowserManager:
             
             # Create and apply route patterns for each blocked domain
             if should_block_ads:
+                # Define a handler that allows document requests but blocks others
+                async def ad_route_handler(route):
+                    if route.request.resource_type == "document":
+                        await route.continue_()
+                    else:
+                        await route.abort()
+
                 for domain in blocked_domains:
-                    await context.route(f"**/*{domain}*/**", lambda route: route.abort())
+                    await context.route(f"**/*{domain}*/**", ad_route_handler)
         return context
 
     def _make_config_signature(self, crawlerRunConfig: CrawlerRunConfig) -> str:

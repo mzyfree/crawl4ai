@@ -338,6 +338,40 @@ class AsyncWebCrawler:
                         config=config,  # Pass the entire config object
                     )
 
+                    # Short-circuit if only raw HTML is requested
+                    if config.only_raw_html:
+                        return CrawlResultContainer(
+                            CrawlResult(
+                                url=url,
+                                html=async_response.html,
+                                success=True,
+                                status_code=async_response.status_code,
+                                cleaned_html="",
+                                markdown=MarkdownGenerationResult(
+                                    raw_markdown="",
+                                    markdown_with_citations="",
+                                    references_markdown="",
+                                    fit_markdown=""
+                                ),
+                                media={},
+                                links={},
+                                metadata={},
+                                screenshot=async_response.screenshot,
+                                pdf=async_response.pdf_data,
+                                extracted_content=None,
+                                error_message="",
+                                redirected_url=async_response.redirected_url or url,
+                                response_headers=async_response.response_headers,
+                                downloaded_files=async_response.downloaded_files,
+                                js_execution_result=async_response.js_execution_result,
+                                mhtml=async_response.mhtml_data,
+                                ssl_certificate=async_response.ssl_certificate,
+                                network_requests=async_response.network_requests,
+                                console_messages=async_response.console_messages,
+                                session_id=getattr(config, "session_id", None),
+                            )
+                        )
+
                     html = sanitize_input_encode(async_response.html)
                     screenshot_data = async_response.screenshot
                     pdf_data = async_response.pdf_data
@@ -512,14 +546,27 @@ class AsyncWebCrawler:
             links = result.links.model_dump() if hasattr(result.links, 'model_dump') else result.links
             metadata = result.metadata
 
-        fit_html = preprocess_html_for_schema(html_content=html, text_threshold= 500, max_size= 300_000)
+        # Optimization: Only calculate fit_html if specifically requested or needed for extraction
+        # fit_html is a heavy operation involving lxml cleaning and pruning
+        markdown_generator: Optional[MarkdownGenerationStrategy] = (
+            config.markdown_generator or DefaultMarkdownGenerator()
+        )
+        
+        needs_fit_html = (
+            (getattr(markdown_generator, 'content_source', '') == 'fit_html') or
+            (config.extraction_strategy and 
+             not isinstance(config.extraction_strategy, NoExtractionStrategy) and 
+             config.extraction_strategy.input_format == 'fit_html')
+        )
+
+        if needs_fit_html:
+            fit_html = preprocess_html_for_schema(html_content=html, text_threshold= 500, max_size= 300_000)
+        else:
+            fit_html = ""
 
         ################################
         # Generate Markdown            #
         ################################
-        markdown_generator: Optional[MarkdownGenerationStrategy] = (
-            config.markdown_generator or DefaultMarkdownGenerator()
-        )
 
         # --- SELECT HTML SOURCE BASED ON CONTENT_SOURCE ---
         # Get the desired source from the generator config, default to 'cleaned_html'

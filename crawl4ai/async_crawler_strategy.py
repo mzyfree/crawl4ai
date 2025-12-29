@@ -974,7 +974,28 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                 except Error as e:
                     raise RuntimeError(f"Failed to extract HTML content: {str(e)}")
             else:
-                html = await page.content()
+                # Retry logic for page.content() to handle race conditions where page is navigating
+                for attempt in range(3):
+                    try:
+                        html = await page.content()
+                        break
+                    except Error as e:
+                        # Check for specific navigation error
+                        if "page is navigating" in str(e) and attempt < 2:
+                            if self.logger:
+                                self.logger.warning(
+                                    message=f"Page is navigating, waiting for new page load (attempt {attempt + 1}/3)...",
+                                    tag="RETRY",
+                                    params={"url": url, "error": str(e)}
+                                )
+                            # Instead of just sleeping, wait for the new navigation to reach domcontentloaded
+                            try:
+                                await page.wait_for_load_state("domcontentloaded", timeout=2000)
+                            except Exception:
+                                # Fallback to sleep if wait_for_load_state fails (e.g. timeout)
+                                await asyncio.sleep(0.5)
+                        else:
+                            raise e
             
             # # Get final HTML content
             # html = await page.content()

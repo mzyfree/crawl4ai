@@ -1178,6 +1178,7 @@ class CrawlerRunConfig():
         chunking_strategy: ChunkingStrategy = RegexChunking(),
         markdown_generator: MarkdownGenerationStrategy = DefaultMarkdownGenerator(),
         only_text: bool = False,
+        only_raw_html: bool = False,
         css_selector: str = None,
         target_elements: List[str] = None,
         excluded_tags: list = None,
@@ -1285,6 +1286,7 @@ class CrawlerRunConfig():
         self.chunking_strategy = chunking_strategy
         self.markdown_generator = markdown_generator
         self.only_text = only_text
+        self.only_raw_html = only_raw_html
         self.css_selector = css_selector
         self.target_elements = target_elements or []
         self.excluded_tags = excluded_tags or []
@@ -1659,6 +1661,7 @@ class CrawlerRunConfig():
             # Connection Parameters
             method=kwargs.get("method", "GET"),
             stream=kwargs.get("stream", False),
+            only_raw_html=kwargs.get("only_raw_html", False),
             check_robots_txt=kwargs.get("check_robots_txt", False),
             user_agent=kwargs.get("user_agent"),
             user_agent_mode=kwargs.get("user_agent_mode"),
@@ -1695,6 +1698,7 @@ class CrawlerRunConfig():
             "chunking_strategy": self.chunking_strategy,
             "markdown_generator": self.markdown_generator,
             "only_text": self.only_text,
+            "only_raw_html": self.only_raw_html,
             "css_selector": self.css_selector,
             "target_elements": self.target_elements,
             "excluded_tags": self.excluded_tags,
@@ -1763,6 +1767,7 @@ class CrawlerRunConfig():
             "capture_console_messages": self.capture_console_messages,
             "method": self.method,
             "stream": self.stream,
+            "only_raw_html": self.only_raw_html,
             "check_robots_txt": self.check_robots_txt,
             "user_agent": self.user_agent,
             "user_agent_mode": self.user_agent_mode,
