@@ -122,10 +122,10 @@ async def lifespan(_: FastAPI):
     monitor_module.monitor_stats.start_persistence_worker()
 
     # Initialize browser pool
-    await init_permanent(BrowserConfig(
-        extra_args=config["crawler"]["browser"].get("extra_args", []),
-        **config["crawler"]["browser"].get("kwargs", {}),
-    ))
+    # await init_permanent(BrowserConfig(
+    #     extra_args=config["crawler"]["browser"].get("extra_args", []),
+    #     **config["crawler"]["browser"].get("kwargs", {}),
+    # ))
 
     # Start background tasks
     app.state.janitor = asyncio.create_task(janitor())

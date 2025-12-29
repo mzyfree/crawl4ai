@@ -897,7 +897,7 @@ class BrowserManager:
             "otf",
             "eot",
             # Styles
-            # 'css', 'less', 'scss', 'sass',
+            'css', 'less', 'scss', 'sass',
             # Media
             "mp4",
             "webm",

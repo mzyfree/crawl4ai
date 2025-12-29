@@ -1,0 +1,19 @@
+# Use the existing image as base
+FROM --platform=linux/amd64 docker-registry.int.rclabenv.com:443/ai/c4ai:25.4.4
+
+# Set environment variables if needed
+ENV PYTHONUNBUFFERED=1
+
+# Copy the modified crawl4ai source code into the container site-packages
+# Overwriting browser_manager.py (with CSS filter enabled)
+COPY crawl4ai/browser_manager.py /usr/local/lib/python3.11/site-packages/crawl4ai/browser_manager.py
+
+# Overwriting server.py (with permanent browser disabled)
+COPY deploy/docker/server.py /app/server.py
+
+# Expose port (inherit from base, but good to document)
+EXPOSE 11235
+
+# Keep the original entrypoint/command
+# CMD ["python", "app.py"] # or whatever the base image uses
+
