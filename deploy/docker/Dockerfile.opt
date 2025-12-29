@@ -5,11 +5,17 @@ FROM --platform=linux/amd64 docker-registry.int.rclabenv.com:443/ai/c4ai:25.4.4
 ENV PYTHONUNBUFFERED=1
 
 # Copy the modified crawl4ai source code into the container site-packages
-# Overwriting browser_manager.py (with CSS filter enabled)
+# Overwriting browser_manager.py (with CSS filter enabled AND AD BLOCKING)
 COPY crawl4ai/browser_manager.py /usr/local/lib/python3.11/site-packages/crawl4ai/browser_manager.py
 
 # Overwriting server.py (with permanent browser disabled)
 COPY deploy/docker/server.py /app/server.py
+
+# Overwriting crawler_pool.py (with retirement & ref counting, limit=100)
+COPY deploy/docker/crawler_pool.py /app/crawler_pool.py
+
+# Overwriting api.py (with release_crawler calls)
+COPY deploy/docker/api.py /app/api.py
 
 # Expose port (inherit from base, but good to document)
 EXPOSE 11235

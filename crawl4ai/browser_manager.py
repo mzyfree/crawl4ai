@@ -991,6 +991,30 @@ class BrowserManager:
             # Create and apply route patterns for each extension
             for ext in blocked_extensions:
                 await context.route(f"**/*.{ext}", lambda route: route.abort())
+
+            # Block common ads and trackers in text_mode
+            blocked_domains = [
+                # Google
+                "**/*google-analytics.com*", "**/*googletagmanager.com*", "**/*googleadservices.com*", 
+                "**/*doubleclick.net*", "**/*googlesyndication.com*", "**/*google-analytics.com*",
+                
+                # Social / Trackers
+                "**/*facebook.net*", "**/*facebook.com/plugins*", "**/*twitter.com/widgets*",
+                "**/*linkedin.com/embed*", "**/*pinterest.com/assets*",
+                
+                # Common Ad Tech
+                "**/*adnxs.com*", "**/*rubiconproject.com*", "**/*criteo.com*", "**/*casalemedia.com*",
+                "**/*pubmatic.com*", "**/*openx.net*", "**/*smartadserver.com*", "**/*taboola.com*",
+                "**/*outbrain.com*", "**/*adroll.com*", "**/*moatads.com*",
+                
+                # Analytics / Telemetry
+                "**/*clarity.ms*", "**/*hotjar.com*", "**/*segment.io*", "**/*sentry.io*", 
+                "**/*newrelic.com*", "**/*mixpanel.com*", "**/*heapanalytics.com*",
+                "**/*optimizely.com*", "**/*mouseflow.com*"
+            ]
+            for domain in blocked_domains:
+                await context.route(domain, lambda route: route.abort())
+
         return context
 
     def _make_config_signature(self, crawlerRunConfig: CrawlerRunConfig) -> str:
