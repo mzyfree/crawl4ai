@@ -546,7 +546,7 @@ async def handle_crawl_request(
             ) if config["crawler"]["rate_limiter"]["enabled"] else None
         )
         
-        from crawler_pool import get_crawler
+        from crawler_pool import get_crawler, release_crawler
         crawler = await get_crawler(browser_config)
 
         # crawler: AsyncWebCrawler = AsyncWebCrawler(config=browser_config)
@@ -587,6 +587,7 @@ async def handle_crawl_request(
             results = [results]
 
         # await crawler.close()
+        await release_crawler(crawler)
         
         end_mem_mb = _get_memory_mb() # <--- Get memory after
         end_time = time.time()
@@ -697,6 +698,9 @@ async def handle_crawl_request(
         end_mem_mb_error = _get_memory_mb()
         if start_mem_mb is not None and end_mem_mb_error is not None:
             mem_delta_mb = end_mem_mb_error - start_mem_mb
+            
+        if 'crawler' in locals() and crawler:
+             await release_crawler(crawler)
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
