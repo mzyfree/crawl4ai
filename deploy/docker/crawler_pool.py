@@ -55,7 +55,7 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
         if not PERMANENT_BROWSER_DISABLED and PERMANENT and _is_default_config(sig):
             LAST_USED[sig] = time.time()
             USAGE_COUNT[sig] = USAGE_COUNT.get(sig, 0) + 1
-            # logger.info("🔥 Using permanent browser")
+            logger.info("🔥 Using permanent browser")
             return PERMANENT
 
         # Check hot pool
@@ -178,7 +178,7 @@ async def janitor():
         mem_pct = get_container_memory_percent()
 
         # Adaptive intervals and TTLs
-        # 严格遵循 BASE_IDLE_TTL，不再做 hot_ttl = ttl * 2 的放大
+        # Strictly follow BASE_IDLE_TTL without multipliers
         if mem_pct > 80:
             interval, cold_ttl, hot_ttl = 10, 30, 60
         elif mem_pct > 60:
