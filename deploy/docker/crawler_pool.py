@@ -32,6 +32,11 @@ PERMANENT_BROWSER_DISABLED = os.getenv("CRAWL4AI_PERMANENT_BROWSER_DISABLED", "f
 MAX_USAGE_COUNT = int(os.getenv("CRAWL4AI_BROWSER_MAX_USAGE", "100"))
 MEMORY_RETIRE_THRESHOLD = int(os.getenv("CRAWL4AI_MEMORY_RETIRE_THRESHOLD", "75"))
 MEMORY_RETIRE_MIN_USAGE = int(os.getenv("CRAWL4AI_MEMORY_RETIRE_MIN_USAGE", "10"))
+PDF_TEMP_CLEANUP_HOURS = int(os.getenv("CRAWL4AI_PDF_TEMP_CLEANUP_HOURS", "1"))
+
+# Global Stats for Audit
+PDF_TOTAL_PROCESSED = 0
+PDF_TOTAL_TRUNCATED = 0
 
 def _sig(cfg: BrowserConfig) -> str:
     """Generate config signature."""
@@ -168,6 +173,7 @@ async def close_all():
 async def janitor():
     """Adaptive cleanup based on memory pressure."""
     last_audit_time = 0
+    last_cleanup_time = 0
     while True:
         mem_pct = get_container_memory_percent()
 
@@ -200,9 +206,28 @@ async def janitor():
                     f"  - HOT_POOL: {len(HOT_POOL)} {_pool_info(HOT_POOL)}\n"
                     f"  - COLD_POOL: {len(COLD_POOL)} {_pool_info(COLD_POOL)}\n"
                     f"  - RETIRED_POOL: {len(RETIRED_POOL)} {_pool_info(RETIRED_POOL)}\n"
+                    f"  - PDF Stats: processed={PDF_TOTAL_PROCESSED}, truncated={PDF_TOTAL_TRUNCATED}\n"
                     f"  - System Memory: {mem_pct:.1f}%"
                 )
                 last_audit_time = now
+
+            # [Stale File Cleanup] Every 30 minutes
+            if now - last_cleanup_time >= 1800:
+                try:
+                    import glob
+                    from pathlib import Path
+                    tmp_files = glob.glob("/tmp/tmp*.pdf")
+                    cleaned_count = 0
+                    cutoff = now - (PDF_TEMP_CLEANUP_HOURS * 3600)
+                    for f in tmp_files:
+                        if os.path.getmtime(f) < cutoff:
+                            os.remove(f)
+                            cleaned_count += 1
+                    if cleaned_count > 0:
+                        logger.info(f"🧹 Janitor: Cleaned {cleaned_count} stale PDF temp files (older than {PDF_TEMP_CLEANUP_HOURS}h)")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup stale PDF files: {e}")
+                last_cleanup_time = now
 
             # Clean cold pool
             for sig in list(COLD_POOL.keys()):
