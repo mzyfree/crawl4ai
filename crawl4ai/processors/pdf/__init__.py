@@ -58,13 +58,15 @@ class PDFContentScrapingStrategy(ContentScrapingStrategy):
                  extract_images : bool = False,
                  image_save_dir : str = None,
                  batch_size: int = 4,
+                 max_pages: int = 100,
                  logger: AsyncLogger = None):
         self.logger = logger
         self.pdf_processor = NaivePDFProcessorStrategy(
             save_images_locally=save_images_locally,
             extract_images=extract_images,
             image_save_dir=image_save_dir,
-            batch_size=batch_size
+            batch_size=batch_size,
+            max_pages=max_pages
         )
         self._temp_files = []  # Track temp files for cleanup
 
@@ -98,6 +100,10 @@ class PDFContentScrapingStrategy(ContentScrapingStrategy):
         </html>
         """
             
+            # Prepare metadata and include processed pages count
+            metadata_dict = asdict(result.metadata)
+            metadata_dict["processed_pages"] = len(result.pages)
+            
             # Accumulate media and links with page numbers
             media = {"images": []}
             links = {"urls": []}
@@ -120,7 +126,7 @@ class PDFContentScrapingStrategy(ContentScrapingStrategy):
                 success=True,
                 media=media,
                 links=links,
-                metadata=asdict(result.metadata)
+                metadata=metadata_dict
             )
         finally:
             # Cleanup temp file if downloaded
@@ -153,7 +159,8 @@ class PDFContentScrapingStrategy(ContentScrapingStrategy):
                 
                 # Download PDF with streaming and timeout
                 # Connection timeout: 10s, Read timeout: 300s (5 minutes for large PDFs)
-                response = requests.get(url, stream=True, timeout=(20, 60 * 10))
+                # verify=False to bypass SSL issues in Docker/Restricted networks
+                response = requests.get(url, stream=True, timeout=(20, 60 * 10), verify=False)
                 response.raise_for_status()
                 
                 # Get file size if available

@@ -21,6 +21,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from api import (
     handle_markdown_request, handle_llm_qa,
     handle_stream_crawl_request, handle_crawl_request,
+    handle_pdf_crawl,
     stream_results
 )
 from schemas import (
@@ -30,6 +31,7 @@ from schemas import (
     HTMLRequest,
     ScreenshotRequest,
     PDFRequest,
+    PDFCrawlRequest,
     JSEndpointRequest,
 )
 
@@ -78,6 +80,10 @@ __version__ = "0.5.1-d1"
 # ── global page semaphore (hard cap) ─────────────────────────
 MAX_PAGES = config["crawler"]["pool"].get("max_pages", 30)
 GLOBAL_SEM = asyncio.Semaphore(MAX_PAGES)
+
+# ── PDF concurrency semaphore ────────────────────────────────
+PDF_CONCURRENCY = int(os.getenv("CRAWL4AI_PDF_CONCURRENCY_LIMIT", "5"))
+PDF_SEM = asyncio.Semaphore(PDF_CONCURRENCY)
 
 # ── default browser config helper ─────────────────────────────
 def get_default_browser_config() -> BrowserConfig:
@@ -431,6 +437,35 @@ async def generate_pdf(
     finally:
         if crawler:
             await release_crawler(crawler)
+
+
+@app.post("/pdf/crawl")
+@limiter.limit(config["rate_limiting"]["default_limit"])
+async def pdf_crawl(
+    request: Request,
+    body: PDFCrawlRequest,
+    _td: Dict = Depends(token_dep),
+):
+    """
+    Directly crawl and extract content from a PDF URL.
+    This bypasses the browser and uses a specialized PDF extraction strategy.
+    Returns standard CrawlResult structure with markdown, metadata, etc.
+    """
+    if PDF_SEM.locked():
+        logger.info(f"⏳ PDF Request queued: url={body.url}")
+        
+    async with PDF_SEM:
+        logger.info(f"▶️ PDF Processing started: url={body.url}")
+        start_time = time.time()
+        result = await handle_pdf_crawl(
+            url=body.url,
+            extract_images=body.extract_images,
+            crawler_config=body.crawler_config,
+            config=config
+        )
+        duration = time.time() - start_time
+        logger.info(f"✅ PDF Processing finished: url={body.url}, time={duration:.2f}s")
+        return result
 
 
 @app.post("/execute_js")

@@ -79,6 +79,11 @@ class PDFRequest(BaseModel):
     url: str
     output_path: Optional[str] = None
 
+class PDFCrawlRequest(BaseModel):
+    url: str
+    extract_images: bool = Field(default=False, description="Whether to extract images from the PDF")
+    crawler_config: Optional[Dict] = Field(default_factory=dict, description="Configuration for content extraction")
+
 
 class JSEndpointRequest(BaseModel):
     url: str

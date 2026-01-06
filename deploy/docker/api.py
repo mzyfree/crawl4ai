@@ -25,6 +25,7 @@ from crawl4ai import (
     RateLimiter, 
     LLMConfig
 )
+from crawl4ai.processors.pdf import PDFCrawlerStrategy, PDFContentScrapingStrategy
 from crawl4ai.utils import perform_completion_with_backoff
 from crawl4ai.content_filter_strategy import (
     PruningContentFilter,
@@ -848,3 +849,88 @@ async def handle_crawl_job(
 
     background_tasks.add_task(_runner)
     return {"task_id": task_id}
+
+
+async def handle_pdf_crawl(
+    url: str,
+    extract_images: bool,
+    crawler_config: dict,
+    config: dict
+) -> dict:
+    """Handle PDF content extraction requests without using a browser."""
+    start_time = time.time()
+    start_mem_mb = _get_memory_mb()
+
+    try:
+        # Load configs and environment variables
+        from crawl4ai import CrawlerRunConfig, AsyncWebCrawler
+        from crawler_pool import PDF_TOTAL_PROCESSED, PDF_TOTAL_TRUNCATED
+        import crawler_pool
+        
+        max_pages = int(os.getenv("CRAWL4AI_PDF_MAX_PAGES", "100"))
+        run_config = CrawlerRunConfig.load(crawler_config)
+
+        # Override strategies for PDF
+        from crawl4ai import PDFContentScrapingStrategy, PDFCrawlerStrategy
+        run_config.scraping_strategy = PDFContentScrapingStrategy(
+            extract_images=extract_images,
+            max_pages=max_pages
+        )
+
+        # Use PDF specialized strategy (no browser needed)
+        async with AsyncWebCrawler(crawler_strategy=PDFCrawlerStrategy()) as crawler:
+            result = await crawler.arun(url=url, config=run_config)
+
+        end_time = time.time()
+        end_mem_mb = _get_memory_mb()
+
+        # Update Global Stats
+        crawler_pool.PDF_TOTAL_PROCESSED += 1
+        
+        # Prepare response
+        processed_result = result.model_dump()
+        
+        # Add PDF-specific status for better feedback
+        if processed_result.get('metadata'):
+            total_pages = processed_result['metadata'].get('pages', 0)
+            processed_pages = processed_result['metadata'].get('processed_pages', 0)
+            
+            if total_pages > max_pages:
+                processed_result['metadata']['pdf_status'] = 'truncated_by_limit'
+                crawler_pool.PDF_TOTAL_TRUNCATED += 1
+            else:
+                processed_result['metadata']['pdf_status'] = 'success'
+
+        # Clean up fields that might cause serialization issues
+        # (Fix for the "<property object at...>" issue by ensuring we get values)
+        for field in ["fit_html", "markdown", "cleaned_html", "markdown_v2"]:
+            # If the field is in the dict but is a property object, get its actual value from result
+            if field in processed_result:
+                val = getattr(result, field, None)
+                if not isinstance(val, (str, type(None), dict, list)):
+                    processed_result[field] = str(val) if val is not None else None
+                else:
+                    processed_result[field] = val
+
+        # Clean up any potential bytes for JSON serialization
+        if processed_result.get('pdf') is not None:
+            from base64 import b64encode
+            if isinstance(processed_result['pdf'], bytes):
+                processed_result['pdf'] = b64encode(
+                    processed_result['pdf']).decode('utf-8')
+
+        return {
+            "success": True,
+            "results": [processed_result],
+            "server_processing_time_s": end_time - start_time,
+            "server_memory_delta_mb": end_mem_mb - start_mem_mb if start_mem_mb and end_mem_mb else 0,
+            "server_peak_memory_mb": max(start_mem_mb or 0, end_mem_mb or 0)
+        }
+
+    except Exception as e:
+        logger.error(f"PDF crawl error: {str(e)}", exc_info=True)
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )

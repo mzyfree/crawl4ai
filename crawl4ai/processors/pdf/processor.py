@@ -56,7 +56,8 @@ class PDFProcessorStrategy(ABC):
 
 class NaivePDFProcessorStrategy(PDFProcessorStrategy):
     def __init__(self, image_dpi: int = 144, image_quality: int = 85, extract_images: bool = True, 
-                 save_images_locally: bool = False, image_save_dir: Optional[Path] = None, batch_size: int = 4):
+                 save_images_locally: bool = False, image_save_dir: Optional[Path] = None, batch_size: int = 4,
+                 max_pages: int = 100):
         # Import check at initialization time
         try:
             import pypdf
@@ -70,6 +71,7 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
         self.save_images_locally = save_images_locally
         self.image_save_dir = image_save_dir
         self.batch_size = batch_size
+        self.max_pages = max_pages
         self._temp_dir = None
 
     def process(self, pdf_path: Path) -> PDFProcessResult:
@@ -101,7 +103,14 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
                         self._temp_dir = tempfile.mkdtemp(prefix='pdf_images_')
                         image_dir = Path(self._temp_dir)
 
-                for page_num, page in enumerate(reader.pages):
+                total_pages = len(reader.pages)
+                process_limit = min(total_pages, self.max_pages)
+                
+                if total_pages > self.max_pages:
+                    logger.warning(f"📄 PDF Truncated: Source has {total_pages} pages, but limit is {self.max_pages}. Processing only the first {self.max_pages} pages.")
+
+                for page_num in range(process_limit):
+                    page = reader.pages[page_num]
                     self.current_page_number = page_num + 1
                     pdf_page = self._process_page(page, image_dir)
                     result.pages.append(pdf_page)
@@ -150,6 +159,10 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
                 reader = PdfReader(file)
                 result.metadata = self._extract_metadata(pdf_path, reader)
                 total_pages = len(reader.pages)
+                process_limit = min(total_pages, self.max_pages)
+                
+                if total_pages > self.max_pages:
+                    logger.warning(f"📄 PDF Truncated (Batch): Source has {total_pages} pages, but limit is {self.max_pages}.")
 
             # Handle image directory setup
             image_dir = None
@@ -172,12 +185,12 @@ class NaivePDFProcessorStrategy(PDFProcessorStrategy):
             # Process pages in parallel batches
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.batch_size) as executor:
                 futures = []
-                for page_num in range(total_pages):
+                for page_num in range(process_limit):
                     future = executor.submit(process_page_safely, page_num)
                     futures.append((page_num + 1, future))
 
                 # Collect results in order
-                result.pages = [None] * total_pages
+                result.pages = [None] * process_limit
                 for page_num, future in futures:
                     try:
                         pdf_page = future.result()
