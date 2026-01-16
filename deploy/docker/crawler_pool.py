@@ -16,12 +16,14 @@ HOT_POOL: Dict[str, AsyncWebCrawler] = {}    # Frequent configs
 COLD_POOL: Dict[str, AsyncWebCrawler] = {}   # Rare configs
 RETIRED_POOL: Dict[str, AsyncWebCrawler] = {} # Browsers marked for retirement
 LAST_USED: Dict[str, float] = {}
+LAST_IDLE: Dict[str, float] = {}  # Last time ref_count was 0
 USAGE_COUNT: Dict[str, int] = {}
 LOCK = asyncio.Lock()
 
 # Config
 MEM_LIMIT = CONFIG.get("crawler", {}).get("memory_threshold_percent", 95.0)
 BASE_IDLE_TTL = CONFIG.get("crawler", {}).get("pool", {}).get("idle_ttl_sec", 300)
+LEAK_DETECTION_THRESHOLD = int(os.getenv("CRAWL4AI_LEAK_DETECTION_THRESHOLD_SEC", "14400")) # 4 hours
 DEFAULT_CONFIG_SIG = None  # Cached sig for default config
 
 # Retirement Config (from env)
@@ -86,6 +88,9 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
                 LAST_USED[sig] = time.time()
                 USAGE_COUNT[sig] = usage + 1
                 crawler.active_requests += 1
+                # If it was idle before, now it's busy
+                if crawler.active_requests == 1:
+                    LAST_IDLE.pop(sig, None)
                 logger.info(f"♨️  Using hot pool browser (sig={sig[:8]}, usage={USAGE_COUNT[sig]}, active={crawler.active_requests})")
                 return crawler
 
@@ -101,6 +106,8 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
                 if not hasattr(crawler, 'active_requests'):
                     crawler.active_requests = 0
                 crawler.active_requests += 1
+                if crawler.active_requests == 1:
+                    LAST_IDLE.pop(sig, None)
                 return crawler
 
             logger.info(f"❄️  Using cold pool browser (sig={sig[:8]})")
@@ -108,6 +115,8 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
             if not hasattr(crawler, 'active_requests'):
                 crawler.active_requests = 0
             crawler.active_requests += 1
+            if crawler.active_requests == 1:
+                LAST_IDLE.pop(sig, None)
             return crawler
 
         # Memory check before creating new
@@ -133,6 +142,17 @@ async def release_crawler(crawler: AsyncWebCrawler):
             crawler.active_requests -= 1
             if crawler.active_requests < 0:
                 crawler.active_requests = 0
+            
+            # If active requests dropped to 0, record idle time
+            if crawler.active_requests == 0:
+                # Find sig to update LAST_IDLE
+                # Since we don't pass sig, we iterate pools. Not efficient but works for now.
+                # Optimization: release_crawler should ideally accept sig.
+                for pool in (HOT_POOL, COLD_POOL, RETIRED_POOL):
+                    for s, c in pool.items():
+                        if c == crawler:
+                            LAST_IDLE[s] = time.time()
+                            break
 
 async def init_permanent(cfg: BrowserConfig):
     """Initialize permanent default browser."""
@@ -169,6 +189,7 @@ async def close_all():
         RETIRED_POOL.clear()
         LAST_USED.clear()
         USAGE_COUNT.clear()
+        LAST_IDLE.clear()
 
 async def janitor():
     """Adaptive cleanup based on memory pressure."""
@@ -197,7 +218,13 @@ async def janitor():
                     for s, c in pool.items():
                         req = getattr(c, 'active_requests', 0)
                         u_count = USAGE_COUNT.get(s, 0)
-                        res.append(f"{s[:8]}(req={req}, usage={u_count})")
+                        # Add last idle time info if busy
+                        idle_status = ""
+                        if req > 0:
+                            last_idle = LAST_IDLE.get(s, now) # If never idle, assume just started
+                            busy_dur = now - last_idle
+                            idle_status = f", busy={busy_dur:.0f}s"
+                        res.append(f"{s[:8]}(req={req}, usage={u_count}{idle_status})")
                     return res
                 
                 logger.info(
@@ -210,6 +237,31 @@ async def janitor():
                     f"  - System Memory: {mem_pct:.1f}%"
                 )
                 last_audit_time = now
+
+            # [Watchdog] Leak Detection & Force Cleanup
+            # Check for browsers stuck in busy state for too long
+            for pool_name, pool in [("HOT", HOT_POOL), ("COLD", COLD_POOL), ("RETIRED", RETIRED_POOL)]:
+                for sig in list(pool.keys()):
+                    crawler = pool[sig]
+                    if getattr(crawler, 'active_requests', 0) > 0:
+                        # If LAST_IDLE is missing, it means it's been busy since creation/get
+                        # We use LAST_USED as a proxy for "start of busy period" if LAST_IDLE missing
+                        start_busy_time = LAST_IDLE.get(sig, LAST_USED.get(sig, now))
+                        busy_duration = now - start_busy_time
+                        
+                        if busy_duration > LEAK_DETECTION_THRESHOLD:
+                            logger.error(f"🚨 [Watchdog] LEAK DETECTED! Browser {sig[:8]} in {pool_name} busy for {busy_duration:.0f}s (> {LEAK_DETECTION_THRESHOLD}s). FORCE KILLING.")
+                            
+                            with suppress(Exception):
+                                await crawler.close()
+                            
+                            pool.pop(sig, None)
+                            LAST_USED.pop(sig, None)
+                            USAGE_COUNT.pop(sig, None)
+                            LAST_IDLE.pop(sig, None)
+                            
+                            # If it was in HOT/COLD, maybe we should move to RETIRED? 
+                            # But if it's leaked, better just kill it to free memory ASAP.
 
             # [Stale File Cleanup] Every 30 minutes
             if now - last_cleanup_time >= 1800:
@@ -240,6 +292,7 @@ async def janitor():
                         COLD_POOL.pop(sig, None)
                         LAST_USED.pop(sig, None)
                         USAGE_COUNT.pop(sig, None)
+                        LAST_IDLE.pop(sig, None)
 
             # Clean hot pool
             for sig in list(HOT_POOL.keys()):
@@ -252,6 +305,7 @@ async def janitor():
                         HOT_POOL.pop(sig, None)
                         LAST_USED.pop(sig, None)
                         USAGE_COUNT.pop(sig, None)
+                        LAST_IDLE.pop(sig, None)
             
             # Clean retired pool
             for sig in list(RETIRED_POOL.keys()):
@@ -261,6 +315,7 @@ async def janitor():
                     with suppress(Exception):
                         await crawler.close()
                     RETIRED_POOL.pop(sig, None)
+                    LAST_IDLE.pop(sig, None)
 
             if mem_pct > 60 or len(RETIRED_POOL) > 0:
                 logger.info(f"📊 Pool: hot={len(HOT_POOL)}, cold={len(COLD_POOL)}, retired={len(RETIRED_POOL)}, mem={mem_pct:.1f}%")
