@@ -36,7 +36,8 @@ from schemas import (
 )
 
 from utils import (
-    FilterType, load_config, setup_logging, verify_email_domain
+    FilterType, load_config, setup_logging, verify_email_domain,
+    get_container_memory_percent, get_container_cpu_percent,
 )
 import os
 import sys
@@ -615,6 +616,41 @@ def get_hook_example(hook_point: str) -> str:
 @app.get(config["observability"]["health_check"]["endpoint"])
 async def health():
     return {"status": "ok", "timestamp": time.time(), "version": __version__}
+
+
+@app.get("/readyz")
+async def readyz():
+    """
+    Readiness probe endpoint.
+
+    Marks the pod as NotReady (HTTP 503) when either CPU or memory utilization
+    is above the configured thresholds.
+    """
+    max_cpu = float(os.getenv("CRAWL4AI_READY_MAX_CPU_PCT", "90"))
+    max_mem = float(os.getenv("CRAWL4AI_READY_MAX_MEM_PCT", "90"))
+    cpu_sample_sec = float(os.getenv("CRAWL4AI_READY_CPU_SAMPLE_SEC", "1.0"))
+
+    cpu_pct = float(get_container_cpu_percent(cpu_sample_sec))
+    mem_pct = float(get_container_memory_percent())
+
+    over = (cpu_pct >= max_cpu) or (mem_pct >= max_mem)
+    if over:
+        return JSONResponse(
+            status_code=503,
+            content={
+            "ready": False,
+            "reason": "resource_pressure",
+            "cpu_percent": round(cpu_pct, 1),
+            "mem_percent": round(mem_pct, 1),
+            "thresholds": {"max_cpu": max_cpu, "max_mem": max_mem},
+            },
+        )
+
+    return {
+        "ready": True,
+        "cpu_percent": round(cpu_pct, 1),
+        "mem_percent": round(mem_pct, 1),
+    }
 
 
 @app.get(config["observability"]["prometheus"]["endpoint"])

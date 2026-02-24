@@ -2,6 +2,9 @@ import dns.resolver
 import logging
 import yaml
 import os
+import time
+import re
+import posixpath
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -181,7 +184,7 @@ def verify_email_domain(email: str) -> bool:
         return False
 
 def get_container_memory_percent() -> float:
-    """Get actual container memory usage vs limit (cgroup v1/v2 aware)."""
+    """Get actual memory usage vs limit (cgroup v1/v2 aware)."""
     try:
         # Try cgroup v2 first
         usage_path = Path("/sys/fs/cgroup/memory.current")
@@ -192,7 +195,8 @@ def get_container_memory_percent() -> float:
             limit_path = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 
         usage = int(usage_path.read_text())
-        limit = int(limit_path.read_text())
+        limit_raw = limit_path.read_text().strip()
+        limit = int(limit_raw) if limit_raw != "max" else int(1e19)
 
         # Handle unlimited (v2: "max", v1: > 1e18)
         if limit > 1e18:
@@ -204,3 +208,117 @@ def get_container_memory_percent() -> float:
         # Non-container or unsupported: fallback to host
         import psutil
         return psutil.virtual_memory().percent
+
+
+def _read_text_if_exists(path: Path) -> Optional[str]:
+    try:
+        if path.exists():
+            return path.read_text().strip()
+    except Exception:
+        return None
+    return None
+
+
+def _extract_cpu_usage_usec(cpu_stat_txt: str) -> Optional[int]:
+    try:
+        for line in cpu_stat_txt.splitlines():
+            if line.startswith("usage_usec "):
+                return int(line.split()[1])
+    except Exception:
+        return None
+    return None
+
+
+def _get_cgroup_cpu_usage_ns() -> Optional[int]:
+    """
+    Return container CPU usage in nanoseconds from cgroup v2 or v1.
+    - v2: /sys/fs/cgroup/cpu.stat -> usage_usec
+    - v1: /sys/fs/cgroup/cpuacct/cpuacct.usage (ns)
+    """
+    # cgroup v2
+    cpu_stat = _read_text_if_exists(Path("/sys/fs/cgroup/cpu.stat"))
+    if cpu_stat:
+        usec = _extract_cpu_usage_usec(cpu_stat)
+        if usec is not None:
+            return usec * 1000
+
+    # cgroup v1
+    usage_ns = _read_text_if_exists(Path("/sys/fs/cgroup/cpuacct/cpuacct.usage"))
+    if usage_ns:
+        return int(usage_ns)
+
+    return None
+
+
+def _get_cgroup_cpu_limit_cores() -> Optional[float]:
+    """
+    Return CPU quota as "cores" if configured; otherwise None for unlimited/unknown.
+    - v2: /sys/fs/cgroup/cpu.max -> "<quota> <period>" or "max <period>"
+    - v1: /sys/fs/cgroup/cpu/cpu.cfs_quota_us and cpu.cfs_period_us
+    """
+    # cgroup v2
+    cpu_max = _read_text_if_exists(Path("/sys/fs/cgroup/cpu.max"))
+    if cpu_max:
+        parts = cpu_max.split()
+        if len(parts) >= 2:
+            quota_s, period_s = parts[0], parts[1]
+            if quota_s != "max":
+                quota_us = int(quota_s)
+                period_us = int(period_s)
+                if quota_us > 0 and period_us > 0:
+                    return quota_us / period_us
+
+    # cgroup v1
+    quota_txt = _read_text_if_exists(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"))
+    period_txt = _read_text_if_exists(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us"))
+    if quota_txt and period_txt:
+        quota_us = int(quota_txt)
+        period_us = int(period_txt)
+        if quota_us > 0 and period_us > 0:
+            return quota_us / period_us
+
+    return None
+
+
+def get_container_cpu_percent(sample_window_sec: float = 1.0) -> float:
+    """
+    Approximate container CPU usage percent relative to its CPU quota.
+
+    - Returns a value in [0, 100] where 100 means the container is fully
+      consuming its allocated CPU limit (quota).
+    - Uses in-function sampling window (blocking), similar to NWSS.
+    """
+    quota_cores = _get_cgroup_cpu_limit_cores()
+    if quota_cores is None or quota_cores <= 0:
+        quota_cores = float(os.cpu_count() or 1)
+
+    if sample_window_sec <= 0:
+        sample_window_sec = 0.5
+
+    u1 = _get_cgroup_cpu_usage_ns()
+    t1 = time.monotonic()
+    if u1 is None:
+        import psutil
+        return float(psutil.Process().cpu_percent(interval=sample_window_sec))
+
+    time.sleep(sample_window_sec)
+
+    u2 = _get_cgroup_cpu_usage_ns()
+    t2 = time.monotonic()
+    if u2 is None:
+        return 0.0
+
+    dt = t2 - t1
+    if dt <= 0:
+        return 0.0
+
+    d_usage = u2 - u1
+    if d_usage <= 0:
+        return 0.0
+
+    pct = (d_usage / (dt * 1e9 * float(quota_cores))) * 100.0
+    if pct < 0:
+        return 0.0
+    if pct > 100.0:
+        return 100.0
+    return pct

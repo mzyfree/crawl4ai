@@ -2,12 +2,14 @@ FROM docker-registry.int.rclabenv.com:443/ai/c4ai:25.4.4-pdf-v3
 
 WORKDIR /app
 
-# Copy only the modified crawler_pool.py
+# Copy modified docker server + utils + pool
 COPY deploy/docker/crawler_pool.py /app/crawler_pool.py
+COPY deploy/docker/server.py /app/server.py
+COPY deploy/docker/utils.py /app/utils.py
 
 # Ensure ownership (though it should be fine as appuser)
 USER root
-RUN chown appuser:appuser /app/crawler_pool.py
+RUN chown appuser:appuser /app/crawler_pool.py /app/server.py /app/utils.py
 USER appuser
 
 # Expose port (inherited, but good for clarity)
