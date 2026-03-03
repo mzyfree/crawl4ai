@@ -68,6 +68,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from prometheus_fastapi_instrumentator import Instrumentator
 from redis import asyncio as aioredis
+from starlette.concurrency import run_in_threadpool
 
 # ── internal imports (after sys.path append) ─────────────────
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -643,12 +644,26 @@ async def readyz():
     Marks the pod as NotReady (HTTP 503) when either CPU or memory utilization
     is above the configured thresholds.
     """
+    # Pressure-based readiness can interfere with benchmarking because it
+    # samples CPU (which may sleep) and adds extra work under load.
+    #
+    # Modes:
+    # - pressure (default): existing behavior (CPU/mem thresholds)
+    # - simple: always ready, no sampling (fast)
+    # - off: disable endpoint (404)
+    mode = os.getenv("CRAWL4AI_READYZ_MODE", "pressure").strip().lower()
+    if mode in {"off", "0", "false", "disabled", "disable"}:
+        return JSONResponse(status_code=404, content={"detail": "readyz disabled"})
+    if mode in {"simple", "fast"}:
+        return {"ready": True, "mode": "simple"}
+
     max_cpu = float(os.getenv("CRAWL4AI_READY_MAX_CPU_PCT", "90"))
     max_mem = float(os.getenv("CRAWL4AI_READY_MAX_MEM_PCT", "90"))
     cpu_sample_sec = float(os.getenv("CRAWL4AI_READY_CPU_SAMPLE_SEC", "1.0"))
 
-    cpu_pct = float(get_container_cpu_percent(cpu_sample_sec))
-    mem_pct = float(get_container_memory_percent())
+    # Avoid blocking the event loop during sampling.
+    cpu_pct = float(await run_in_threadpool(get_container_cpu_percent, cpu_sample_sec))
+    mem_pct = float(await run_in_threadpool(get_container_memory_percent))
 
     over = (cpu_pct >= max_cpu) or (mem_pct >= max_mem)
     if over:
