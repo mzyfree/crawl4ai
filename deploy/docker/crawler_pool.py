@@ -40,6 +40,51 @@ PDF_TEMP_CLEANUP_HOURS = int(os.getenv("CRAWL4AI_PDF_TEMP_CLEANUP_HOURS", "1"))
 PDF_TOTAL_PROCESSED = 0
 PDF_TOTAL_TRUNCATED = 0
 
+# Pool lifecycle observability switches
+POOL_LIFECYCLE_DEBUG = os.getenv("CRAWL4AI_POOL_LIFECYCLE_DEBUG", "false").lower() == "true"
+try:
+    POOL_LIFECYCLE_LOG_INTERVAL = max(
+        1, int(os.getenv("CRAWL4AI_POOL_LIFECYCLE_LOG_INTERVAL", "200"))
+    )
+except ValueError:
+    POOL_LIFECYCLE_LOG_INTERVAL = 200
+
+POOL_TOTAL_ACQUIRED = 0
+POOL_TOTAL_RELEASED = 0
+POOL_ACTIVE_BORROWS = 0
+POOL_SEQ = 0
+POOL_CRAWLER_ACTIVE: Dict[int, int] = {}
+
+
+def _pool_lifecycle_log(event: str, sig: str, crawler: Optional[AsyncWebCrawler] = None):
+    """Emit lightweight lifecycle logs for crawler borrow/release tracking."""
+    global POOL_TOTAL_ACQUIRED, POOL_TOTAL_RELEASED, POOL_ACTIVE_BORROWS
+    crawler_id = id(crawler) if crawler else None
+    crawler_active = POOL_CRAWLER_ACTIVE.get(crawler_id, 0) if crawler_id else 0
+
+    if POOL_LIFECYCLE_DEBUG:
+        logger.info(
+            "🔎 PoolLifecycle %s sig=%s active_borrows=%s crawler_id=%s crawler_active=%s totals(acq=%s, rel=%s)",
+            event,
+            sig[:8] if sig else "unknown",
+            POOL_ACTIVE_BORROWS,
+            crawler_id,
+            crawler_active,
+            POOL_TOTAL_ACQUIRED,
+            POOL_TOTAL_RELEASED,
+        )
+        return
+
+    total_events = POOL_TOTAL_ACQUIRED + POOL_TOTAL_RELEASED
+    if total_events > 0 and total_events % POOL_LIFECYCLE_LOG_INTERVAL == 0:
+        logger.info(
+            "🔎 PoolLifecycle snapshot active_borrows=%s totals(acq=%s, rel=%s)",
+            POOL_ACTIVE_BORROWS,
+            POOL_TOTAL_ACQUIRED,
+            POOL_TOTAL_RELEASED,
+        )
+
+
 def _sig(cfg: BrowserConfig) -> str:
     """Generate config signature."""
     payload = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",",":"))
@@ -51,12 +96,19 @@ def _is_default_config(sig: str) -> bool:
 
 async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
     """Get crawler from pool with tiered strategy."""
+    global POOL_TOTAL_ACQUIRED, POOL_ACTIVE_BORROWS, POOL_SEQ
     sig = _sig(cfg)
     async with LOCK:
         # Use permanent browser if not disabled and config matches
         if not PERMANENT_BROWSER_DISABLED and PERMANENT and _is_default_config(sig):
             LAST_USED[sig] = time.time()
             USAGE_COUNT[sig] = USAGE_COUNT.get(sig, 0) + 1
+            POOL_TOTAL_ACQUIRED += 1
+            POOL_ACTIVE_BORROWS += 1
+            POOL_SEQ += 1
+            crawler_id = id(PERMANENT)
+            POOL_CRAWLER_ACTIVE[crawler_id] = POOL_CRAWLER_ACTIVE.get(crawler_id, 0) + 1
+            _pool_lifecycle_log(f"acquire#{POOL_SEQ}", sig, PERMANENT)
             logger.info("🔥 Using permanent browser")
             return PERMANENT
 
@@ -91,6 +143,12 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
                 # If it was idle before, now it's busy
                 if crawler.active_requests == 1:
                     LAST_IDLE.pop(sig, None)
+                POOL_TOTAL_ACQUIRED += 1
+                POOL_ACTIVE_BORROWS += 1
+                POOL_SEQ += 1
+                crawler_id = id(crawler)
+                POOL_CRAWLER_ACTIVE[crawler_id] = POOL_CRAWLER_ACTIVE.get(crawler_id, 0) + 1
+                _pool_lifecycle_log(f"acquire#{POOL_SEQ}", sig, crawler)
                 logger.info(f"♨️  Using hot pool browser (sig={sig[:8]}, usage={USAGE_COUNT[sig]}, active={crawler.active_requests})")
                 return crawler
 
@@ -108,6 +166,12 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
                 crawler.active_requests += 1
                 if crawler.active_requests == 1:
                     LAST_IDLE.pop(sig, None)
+                POOL_TOTAL_ACQUIRED += 1
+                POOL_ACTIVE_BORROWS += 1
+                POOL_SEQ += 1
+                crawler_id = id(crawler)
+                POOL_CRAWLER_ACTIVE[crawler_id] = POOL_CRAWLER_ACTIVE.get(crawler_id, 0) + 1
+                _pool_lifecycle_log(f"acquire#{POOL_SEQ}", sig, crawler)
                 return crawler
 
             logger.info(f"❄️  Using cold pool browser (sig={sig[:8]})")
@@ -117,6 +181,12 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
             crawler.active_requests += 1
             if crawler.active_requests == 1:
                 LAST_IDLE.pop(sig, None)
+            POOL_TOTAL_ACQUIRED += 1
+            POOL_ACTIVE_BORROWS += 1
+            POOL_SEQ += 1
+            crawler_id = id(crawler)
+            POOL_CRAWLER_ACTIVE[crawler_id] = POOL_CRAWLER_ACTIVE.get(crawler_id, 0) + 1
+            _pool_lifecycle_log(f"acquire#{POOL_SEQ}", sig, crawler)
             return crawler
 
         # Memory check before creating new
@@ -133,11 +203,28 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
         COLD_POOL[sig] = crawler
         LAST_USED[sig] = time.time()
         USAGE_COUNT[sig] = 1
+        POOL_TOTAL_ACQUIRED += 1
+        POOL_ACTIVE_BORROWS += 1
+        POOL_SEQ += 1
+        crawler_id = id(crawler)
+        POOL_CRAWLER_ACTIVE[crawler_id] = POOL_CRAWLER_ACTIVE.get(crawler_id, 0) + 1
+        _pool_lifecycle_log(f"acquire#{POOL_SEQ}", sig, crawler)
         return crawler
 
 async def release_crawler(crawler: AsyncWebCrawler):
     """Decrement active request count for a crawler."""
+    global POOL_TOTAL_RELEASED, POOL_ACTIVE_BORROWS
     async with LOCK:
+        pool_sig = None
+        crawler_id = id(crawler)
+        for pool in (HOT_POOL, COLD_POOL, RETIRED_POOL):
+            for s, c in pool.items():
+                if c == crawler:
+                    pool_sig = s
+                    break
+            if pool_sig:
+                break
+
         if hasattr(crawler, 'active_requests'):
             crawler.active_requests -= 1
             if crawler.active_requests < 0:
@@ -148,11 +235,18 @@ async def release_crawler(crawler: AsyncWebCrawler):
                 # Find sig to update LAST_IDLE
                 # Since we don't pass sig, we iterate pools. Not efficient but works for now.
                 # Optimization: release_crawler should ideally accept sig.
-                for pool in (HOT_POOL, COLD_POOL, RETIRED_POOL):
-                    for s, c in pool.items():
-                        if c == crawler:
-                            LAST_IDLE[s] = time.time()
-                            break
+                if pool_sig:
+                    LAST_IDLE[pool_sig] = time.time()
+
+            # Lifecycle accounting (always attempt to keep counters consistent)
+            POOL_TOTAL_RELEASED += 1
+            POOL_ACTIVE_BORROWS = max(0, POOL_ACTIVE_BORROWS - 1)
+            current = POOL_CRAWLER_ACTIVE.get(crawler_id, 0)
+            if current <= 1:
+                POOL_CRAWLER_ACTIVE.pop(crawler_id, None)
+            else:
+                POOL_CRAWLER_ACTIVE[crawler_id] = current - 1
+            _pool_lifecycle_log("release", pool_sig or "unknown", crawler)
 
 async def init_permanent(cfg: BrowserConfig):
     """Initialize permanent default browser."""
