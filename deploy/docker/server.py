@@ -66,7 +66,7 @@ import crawl4ai as _c4
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator import Instrumentator, metrics
 from redis import asyncio as aioredis
 from starlette.concurrency import run_in_threadpool
 
@@ -236,7 +236,24 @@ def _setup_security(app_: FastAPI):
 _setup_security(app)
 
 if config["observability"]["prometheus"]["enabled"]:
-    Instrumentator().instrument(app).expose(app)
+    # Use wider low-resolution latency buckets for crawl workloads so
+    # /crawl quantiles (P50/P90/P95/P99) remain meaningful beyond 1s.
+    latency_lowr_buckets = (
+        0.1,
+        0.3,
+        0.5,
+        1,
+        2,
+        5,
+        10,
+        20,
+        30,
+        60,
+        120,
+    )
+    Instrumentator().add(
+        metrics.default(latency_lowr_buckets=latency_lowr_buckets)
+    ).instrument(app).expose(app)
 
 token_dep = get_token_dependency(config)
 
