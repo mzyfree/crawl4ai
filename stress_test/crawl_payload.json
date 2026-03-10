@@ -1,0 +1,83 @@
+{
+  "urls": [
+    "https://www.ringcentral.com/ringsense.html",
+    "https://www.ringcentral.com",
+    "https://support.ringcentral.com/article-v2/RingCX-supported-languages.html?brand=RingCentral&product=RingCX&language=en_US"
+  ],
+  "browser_config": {
+    "type": "BrowserConfig",
+    "params": {
+      "headless": true,
+      "verbose": false,
+      "ignore_https_errors": true,
+      "avoid_ads": true,
+      "avoid_css": true,
+      "light_mode": true,
+      "text_mode": true,
+      "browser_type": "chromium",
+      "use_persistent_context": false,
+      "extra_args": [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+        "--no-first-run",
+        "--disable-features=IsolateOrigins,site-per-process,AudioServiceOutOfProcess,NetworkService,VizDisplayCompositor,NetworkServiceInProcess,Translate,CalculateNativeWinOcclusion",
+        "--disable-site-isolation-trials",
+        "--disable-canvas-aa",
+        "--disable-2d-canvas-clip-utils",
+        "--disable-gl-drawing-for-tests",
+        "--disable-accelerated-2d-canvas",
+        "--disable-accelerated-video-decode",
+        "--disable-software-rasterizer",
+        "--force-color-profile=srgb",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-breakpad",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-extensions",
+        "--disable-hang-monitor",
+        "--disable-ipc-flooding-protection",
+        "--disable-notifications",
+        "--disable-popup-blocking",
+        "--disable-print-preview",
+        "--disable-prompt-on-repost",
+        "--disable-sync",
+        "--disable-translate",
+        "--disable-default-apps",
+        "--metrics-recording-only",
+        "--safebrowsing-disable-auto-update",
+        "--mute-audio",
+        "--autoplay-policy=user-gesture-required",
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "--js-flags='--max-old-space-size=256'",
+        "--blink-settings=imagesEnabled=false",
+        "--disk-cache-size=0",
+        "--media-cache-size=0",
+        "--renderer-process-limit=4",
+        "--disable-background-networking"
+      ]
+    }
+  },
+  "crawler_config": {
+    "type": "CrawlerRunConfig",
+    "params": {
+      "cache_mode": {
+        "type": "CacheMode",
+        "params": "disabled"
+      },
+      "wait_until": "domcontentloaded",
+      "wait_for_images": false,
+      "delay_before_return_html": 0.6,
+      "semaphore_count": 1,
+      "exclude_external_images": true,
+      "only_text": true,
+      "remove_overlay_elements": false,
+      "process_iframes": false
+    }
+  }
+}

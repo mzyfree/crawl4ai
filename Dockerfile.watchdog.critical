@@ -1,0 +1,42 @@
+FROM docker-registry.int.rclabenv.com:443/ai/c4ai:25.4.4-pdf-v3
+
+WORKDIR /app
+
+# Copy modified docker server + utils + pool
+COPY deploy/docker/crawler_pool.py /app/crawler_pool.py
+COPY deploy/docker/server.py /app/server.py
+COPY deploy/docker/api.py /app/api.py
+COPY deploy/docker/utils.py /app/utils.py
+COPY crawl4ai/async_crawler_strategy.py /tmp/async_crawler_strategy.py
+COPY crawl4ai/async_configs.py /tmp/async_configs.py
+COPY crawl4ai/browser_manager.py /tmp/browser_manager.py
+
+USER root
+
+# Upgrade crawl4ai to 0.8.0 for CVE fixes, then apply local customizations.
+RUN pip install --no-cache-dir "crawl4ai>=0.8.0"
+
+# Critical OS fixes: repair deps first, then upgrade only key libs.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libmbedcrypto7 && \
+    apt-get -f install -y && \
+    apt-get install -y --no-install-recommends --only-upgrade \
+      libnss3 \
+      openssl \
+      libglib2.0-0 \
+      libglib2.0-bin \
+      libglib2.0-data && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Apply local business customizations (avoid_ads, avoid_css, async_crawler_strategy).
+RUN python3 -c "import crawl4ai, pathlib, shutil; base = pathlib.Path(crawl4ai.__file__).parent; [shutil.copy(f'/tmp/{n}', base / n) or print(f'patched: {base / n}') for n in ['async_configs.py', 'browser_manager.py', 'async_crawler_strategy.py']]"
+
+RUN chown appuser:appuser /app/crawler_pool.py /app/server.py /app/api.py /app/utils.py
+
+USER appuser
+
+# Expose port (inherited, but kept for clarity)
+EXPOSE 11235
+
+# Command inherited from base image (supervisord)
