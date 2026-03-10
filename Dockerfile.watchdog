@@ -6,10 +6,12 @@ WORKDIR /app
 COPY deploy/docker/crawler_pool.py /app/crawler_pool.py
 COPY deploy/docker/server.py /app/server.py
 COPY deploy/docker/utils.py /app/utils.py
+COPY crawl4ai/async_crawler_strategy.py /tmp/async_crawler_strategy.py
 
 # Ensure ownership (though it should be fine as appuser)
 USER root
 RUN chown appuser:appuser /app/crawler_pool.py /app/server.py /app/utils.py
+RUN python3 -c "import crawl4ai, pathlib, shutil; p=pathlib.Path(crawl4ai.__file__).parent/'async_crawler_strategy.py'; shutil.copy('/tmp/async_crawler_strategy.py', p); print(f'patched: {p}')"
 USER appuser
 
 # Expose port (inherited, but good for clarity)
