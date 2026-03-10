@@ -114,6 +114,17 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
             logger=self.logger,
             use_undetected=isinstance(self.adapter, UndetectedAdapter)
         )
+        self._lifecycle_total_acquired = 0
+        self._lifecycle_total_closed = 0
+        self._lifecycle_active_pages = 0
+        self._lifecycle_seq = 0
+        self._lifecycle_debug = os.getenv("CRAWL4AI_PAGE_LIFECYCLE_DEBUG", "false").lower() == "true"
+        try:
+            self._lifecycle_log_interval = max(
+                1, int(os.getenv("CRAWL4AI_PAGE_LIFECYCLE_LOG_INTERVAL", "100"))
+            )
+        except ValueError:
+            self._lifecycle_log_interval = 100
 
     async def __aenter__(self):
         await self.start()
@@ -539,6 +550,35 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
 
         # Get page for session
         page, context = await self.browser_manager.get_page(crawlerRunConfig=config)
+        self._lifecycle_seq += 1
+        lifecycle_id = f"p{self._lifecycle_seq}"
+        self._lifecycle_total_acquired += 1
+        self._lifecycle_active_pages += 1
+        page_closed = False
+        crawl_start_ts = time.time()
+
+        if self._lifecycle_debug:
+            self.logger.info(
+                message="Lifecycle acquire id={id} session={session} active_pages={active}",
+                tag="LIFECYCLE",
+                params={
+                    "id": lifecycle_id,
+                    "session": bool(config.session_id),
+                    "active": self._lifecycle_active_pages,
+                },
+            )
+        elif self._lifecycle_total_acquired % self._lifecycle_log_interval == 0:
+            self.logger.info(
+                message=(
+                    "Lifecycle snapshot acquired={acquired} closed={closed} active={active}"
+                ),
+                tag="LIFECYCLE",
+                params={
+                    "acquired": self._lifecycle_total_acquired,
+                    "closed": self._lifecycle_total_closed,
+                    "active": self._lifecycle_active_pages,
+                },
+            )
 
         # await page.goto(URL)
 
@@ -547,14 +587,10 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         #     [{"name": "cookiesEnabled", "value": "true", "url": url}]
         # )
 
-        # Handle navigator overrides
-        if config.override_navigator or config.simulate_user or config.magic:
-            await context.add_init_script(load_js_script("navigator_overrider"))
-
-        # Call hook after page creation
-        await self.execute_hook("on_page_context_created", page, context=context, config=config)
-
         # Network Request Capturing
+        handle_request_capture = None
+        handle_response_capture = None
+        handle_request_failed_capture = None
         if config.capture_network_requests:
             async def handle_request_capture(request):
                 try:
@@ -646,6 +682,31 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         # Set up console logging if requested
         # Note: For undetected browsers, console logging won't work directly
         # but captured messages can still be logged after retrieval
+
+        try:
+            # Handle navigator overrides
+            if config.override_navigator or config.simulate_user or config.magic:
+                await context.add_init_script(load_js_script("navigator_overrider"))
+
+            # Call hook after page creation
+            await self.execute_hook("on_page_context_created", page, context=context, config=config)
+        except Exception:
+            # Fail-fast branch must close the page to avoid leaking renderer processes.
+            if not config.session_id:
+                with contextlib.suppress(Exception):
+                    await page.close()
+                page_closed = True
+                self._lifecycle_total_closed += 1
+                self._lifecycle_active_pages = max(0, self._lifecycle_active_pages - 1)
+                if self._lifecycle_debug:
+                    self.logger.info(
+                        message=(
+                            "Lifecycle early-close id={id} active_pages={active}"
+                        ),
+                        tag="LIFECYCLE",
+                        params={"id": lifecycle_id, "active": self._lifecycle_active_pages},
+                    )
+            raise
 
         try:
             # Get SSL certificate information if requested and URL is HTTPS
@@ -1069,30 +1130,50 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
             raise e
 
         finally:
-            # If no session_id is given we should close the page
-            all_contexts = page.context.browser.contexts
-            total_pages = sum(len(context.pages) for context in all_contexts)                
-            if config.session_id:
-                pass
-            elif total_pages <= 1 and (self.browser_config.use_managed_browser or self.browser_config.headless):
-                pass
-            else:
-                # Detach listeners before closing to prevent potential errors during close
-                if config.capture_network_requests:
+            # Detach listeners before closing to prevent potential errors during close
+            if config.capture_network_requests and not page_closed:
+                with contextlib.suppress(Exception):
                     page.remove_listener("request", handle_request_capture)
+                with contextlib.suppress(Exception):
                     page.remove_listener("response", handle_response_capture)
+                with contextlib.suppress(Exception):
                     page.remove_listener("requestfailed", handle_request_failed_capture)
-                if config.capture_console_messages:
-                    # Retrieve any final console messages for undetected browsers
-                    if hasattr(self.adapter, 'retrieve_console_messages'):
+            if config.capture_console_messages and not page_closed:
+                # Retrieve any final console messages for undetected browsers
+                if hasattr(self.adapter, "retrieve_console_messages"):
+                    with contextlib.suppress(Exception):
                         final_messages = await self.adapter.retrieve_console_messages(page)
                         captured_console.extend(final_messages)
-                    
-                    # Clean up console capture
+
+                # Clean up console capture
+                with contextlib.suppress(Exception):
                     await self.adapter.cleanup_console_capture(page, handle_console, handle_error)
-                
-                # Close the page
-                await page.close()
+
+            if not config.session_id and not page_closed:
+                with contextlib.suppress(Exception):
+                    if not page.is_closed():
+                        await page.close()
+                page_closed = True
+                self._lifecycle_total_closed += 1
+                self._lifecycle_active_pages = max(0, self._lifecycle_active_pages - 1)
+                if self._lifecycle_debug:
+                    self.logger.info(
+                        message=(
+                            "Lifecycle close id={id} active_pages={active} elapsed={elapsed:.2f}s"
+                        ),
+                        tag="LIFECYCLE",
+                        params={
+                            "id": lifecycle_id,
+                            "active": self._lifecycle_active_pages,
+                            "elapsed": time.time() - crawl_start_ts,
+                        },
+                    )
+            elif config.session_id and self._lifecycle_debug:
+                self.logger.info(
+                    message="Lifecycle keep-session id={id} session_id={session_id}",
+                    tag="LIFECYCLE",
+                    params={"id": lifecycle_id, "session_id": config.session_id},
+                )
 
     # async def _handle_full_page_scan(self, page: Page, scroll_delay: float = 0.1):
     async def _handle_full_page_scan(self, page: Page, scroll_delay: float = 0.1, max_scroll_steps: Optional[int] = None):
