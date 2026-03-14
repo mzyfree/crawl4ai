@@ -233,7 +233,9 @@ class MonitorStats:
         net = psutil.net_io_counters()
 
         # Pool status (acquire lock to prevent race conditions)
-        from crawler_pool import PERMANENT, HOT_POOL, COLD_POOL, LOCK
+        from crawler_pool import PERMANENT, HOT_POOL, COLD_POOL, LOCK, get_janitor_state
+        janitor_state = get_janitor_state()
+        now = time.time()
         async with LOCK:
             # TODO: Track actual browser process memory instead of estimates
             # These are conservative estimates based on typical Chromium usage
@@ -259,8 +261,14 @@ class MonitorStats:
                 "total_memory_mb": permanent_mem + hot_mem + cold_mem
             },
             "janitor": {
-                "next_cleanup_estimate": "adaptive",  # Would need janitor state
-                "memory_pressure": "LOW" if mem_pct < 60 else "MEDIUM" if mem_pct < 80 else "HIGH"
+                "next_cleanup_estimate": "adaptive",
+                "memory_pressure": "LOW" if mem_pct < 60 else "MEDIUM" if mem_pct < 80 else "HIGH",
+                "running": janitor_state["running"],
+                "loop_count": janitor_state["loop_count"],
+                "last_tick_epoch": janitor_state["last_tick"],
+                "last_tick_seconds_ago": round(now - janitor_state["last_tick"], 1) if janitor_state["last_tick"] else None,
+                "last_action": janitor_state["last_action"],
+                "last_error": janitor_state["last_error"],
             }
         }
 

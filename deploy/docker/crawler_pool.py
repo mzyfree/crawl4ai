@@ -1,5 +1,5 @@
 # crawler_pool.py - Smart browser pool with tiered management
-import asyncio, json, hashlib, time, os
+import asyncio, gc, json, hashlib, time, os
 import psutil
 from contextlib import suppress
 from typing import Dict, Optional
@@ -24,6 +24,7 @@ LOCK = asyncio.Lock()
 MEM_LIMIT = CONFIG.get("crawler", {}).get("memory_threshold_percent", 95.0)
 BASE_IDLE_TTL = CONFIG.get("crawler", {}).get("pool", {}).get("idle_ttl_sec", 300)
 LEAK_DETECTION_THRESHOLD = int(os.getenv("CRAWL4AI_LEAK_DETECTION_THRESHOLD_SEC", "14400")) # 4 hours
+RETIRED_FORCE_CLOSE_SEC = int(os.getenv("CRAWL4AI_RETIRED_FORCE_CLOSE_SEC", "300"))
 DEFAULT_CONFIG_SIG = None  # Cached sig for default config
 
 # Retirement Config (from env)
@@ -54,6 +55,22 @@ POOL_TOTAL_RELEASED = 0
 POOL_ACTIVE_BORROWS = 0
 POOL_SEQ = 0
 POOL_CRAWLER_ACTIVE: Dict[int, int] = {}
+JANITOR_LAST_TICK = 0.0
+JANITOR_LOOP_COUNT = 0
+JANITOR_LAST_ACTION = "never"
+JANITOR_LAST_ERROR = ""
+JANITOR_RUNNING = False
+
+
+def get_janitor_state() -> Dict[str, object]:
+    """Return janitor heartbeat and debug state for monitor endpoints."""
+    return {
+        "running": JANITOR_RUNNING,
+        "last_tick": JANITOR_LAST_TICK,
+        "loop_count": JANITOR_LOOP_COUNT,
+        "last_action": JANITOR_LAST_ACTION,
+        "last_error": JANITOR_LAST_ERROR,
+    }
 
 
 def _pool_lifecycle_log(event: str, sig: str, crawler: Optional[AsyncWebCrawler] = None):
@@ -287,129 +304,149 @@ async def close_all():
 
 async def janitor():
     """Adaptive cleanup based on memory pressure."""
+    global JANITOR_LAST_TICK, JANITOR_LOOP_COUNT, JANITOR_LAST_ACTION, JANITOR_LAST_ERROR, JANITOR_RUNNING
     last_audit_time = 0
     last_cleanup_time = 0
+    JANITOR_RUNNING = True
+    JANITOR_LAST_ACTION = "started"
     while True:
-        mem_pct = get_container_memory_percent()
+        try:
+            mem_pct = get_container_memory_percent()
 
-        # Adaptive intervals and TTLs
-        # Strictly follow BASE_IDLE_TTL without multipliers
-        if mem_pct > 80:
-            interval, cold_ttl, hot_ttl = 10, 30, 60
-        elif mem_pct > 60:
-            interval, cold_ttl, hot_ttl = 30, 60, 120
-        else:
-            interval, cold_ttl, hot_ttl = 60, BASE_IDLE_TTL, BASE_IDLE_TTL
+            if mem_pct > 80:
+                interval, cold_ttl, hot_ttl = 10, 30, 60
+            elif mem_pct > 60:
+                interval, cold_ttl, hot_ttl = 30, 60, 120
+            else:
+                interval, cold_ttl, hot_ttl = 60, BASE_IDLE_TTL, BASE_IDLE_TTL
 
-        await asyncio.sleep(interval)
+            await asyncio.sleep(interval)
 
-        now = time.time()
-        async with LOCK:
-            # [Audit Log] Every 5 minutes
-            if POOL_AUDIT_ENABLED and now - last_audit_time >= 300:
-                def _pool_info(pool):
-                    res = []
-                    for s, c in pool.items():
-                        req = getattr(c, 'active_requests', 0)
-                        u_count = USAGE_COUNT.get(s, 0)
-                        # Add last idle time info if busy
-                        idle_status = ""
-                        if req > 0:
-                            last_idle = LAST_IDLE.get(s, now) # If never idle, assume just started
-                            busy_dur = now - last_idle
-                            idle_status = f", busy={busy_dur:.0f}s"
-                        res.append(f"{s[:8]}(req={req}, usage={u_count}{idle_status})")
-                    return res
-                
-                logger.info(
-                    f"🧐 [Pool Audit]\n"
-                    f"  - PERMANENT: {'Active' if PERMANENT else 'None/Disabled'}\n"
-                    f"  - HOT_POOL: {len(HOT_POOL)} {_pool_info(HOT_POOL)}\n"
-                    f"  - COLD_POOL: {len(COLD_POOL)} {_pool_info(COLD_POOL)}\n"
-                    f"  - RETIRED_POOL: {len(RETIRED_POOL)} {_pool_info(RETIRED_POOL)}\n"
-                    f"  - PDF Stats: processed={PDF_TOTAL_PROCESSED}, truncated={PDF_TOTAL_TRUNCATED}\n"
-                    f"  - System Memory: {mem_pct:.1f}%"
-                )
-                last_audit_time = now
+            now = time.time()
+            JANITOR_LAST_TICK = now
+            JANITOR_LOOP_COUNT += 1
+            JANITOR_LAST_ACTION = f"scan mem={mem_pct:.1f}% hot={len(HOT_POOL)} cold={len(COLD_POOL)} retired={len(RETIRED_POOL)}"
+            JANITOR_LAST_ERROR = ""
+            async with LOCK:
+                if POOL_AUDIT_ENABLED and now - last_audit_time >= 300:
+                    def _pool_info(pool):
+                        res = []
+                        for sig, crawler in pool.items():
+                            req = getattr(crawler, 'active_requests', 0)
+                            usage = USAGE_COUNT.get(sig, 0)
+                            idle_status = ""
+                            if req > 0:
+                                last_idle = LAST_IDLE.get(sig, now)
+                                idle_status = f", busy={now - last_idle:.0f}s"
+                            res.append(f"{sig[:8]}(req={req}, usage={usage}{idle_status})")
+                        return res
 
-            # [Watchdog] Leak Detection & Force Cleanup
-            # Check for browsers stuck in busy state for too long
-            for pool_name, pool in [("HOT", HOT_POOL), ("COLD", COLD_POOL), ("RETIRED", RETIRED_POOL)]:
-                for sig in list(pool.keys()):
-                    crawler = pool[sig]
-                    if getattr(crawler, 'active_requests', 0) > 0:
-                        # If LAST_IDLE is missing, it means it's been busy since creation/get
-                        # We use LAST_USED as a proxy for "start of busy period" if LAST_IDLE missing
-                        start_busy_time = LAST_IDLE.get(sig, LAST_USED.get(sig, now))
-                        busy_duration = now - start_busy_time
-                        
-                        if busy_duration > LEAK_DETECTION_THRESHOLD:
-                            logger.error(f"🚨 [Watchdog] LEAK DETECTED! Browser {sig[:8]} in {pool_name} busy for {busy_duration:.0f}s (> {LEAK_DETECTION_THRESHOLD}s). FORCE KILLING.")
-                            
+                    logger.info(
+                        f"🧐 [Pool Audit]\n"
+                        f"  - PERMANENT: {'Active' if PERMANENT else 'None/Disabled'}\n"
+                        f"  - HOT_POOL: {len(HOT_POOL)} {_pool_info(HOT_POOL)}\n"
+                        f"  - COLD_POOL: {len(COLD_POOL)} {_pool_info(COLD_POOL)}\n"
+                        f"  - RETIRED_POOL: {len(RETIRED_POOL)} {_pool_info(RETIRED_POOL)}\n"
+                        f"  - PDF Stats: processed={PDF_TOTAL_PROCESSED}, truncated={PDF_TOTAL_TRUNCATED}\n"
+                        f"  - System Memory: {mem_pct:.1f}%"
+                    )
+                    last_audit_time = now
+
+                for pool_name, pool in [("HOT", HOT_POOL), ("COLD", COLD_POOL), ("RETIRED", RETIRED_POOL)]:
+                    for sig in list(pool.keys()):
+                        crawler = pool[sig]
+                        if getattr(crawler, 'active_requests', 0) > 0:
+                            start_busy_time = LAST_IDLE.get(sig, LAST_USED.get(sig, now))
+                            busy_duration = now - start_busy_time
+                            if busy_duration > LEAK_DETECTION_THRESHOLD:
+                                logger.error(
+                                    f"🚨 [Watchdog] LEAK DETECTED! Browser {sig[:8]} in {pool_name} busy for {busy_duration:.0f}s (> {LEAK_DETECTION_THRESHOLD}s). FORCE KILLING."
+                                )
+                                JANITOR_LAST_ACTION = f"watchdog_force_close {pool_name.lower()} sig={sig[:8]}"
+                                with suppress(Exception):
+                                    await crawler.close()
+                                pool.pop(sig, None)
+                                LAST_USED.pop(sig, None)
+                                USAGE_COUNT.pop(sig, None)
+                                LAST_IDLE.pop(sig, None)
+
+                if now - last_cleanup_time >= 1800:
+                    try:
+                        import glob
+                        tmp_files = glob.glob("/tmp/tmp*.pdf")
+                        cleaned_count = 0
+                        cutoff = now - (PDF_TEMP_CLEANUP_HOURS * 3600)
+                        for path in tmp_files:
+                            if os.path.getmtime(path) < cutoff:
+                                os.remove(path)
+                                cleaned_count += 1
+                        if cleaned_count > 0:
+                            logger.info(
+                                f"🧹 Janitor: Cleaned {cleaned_count} stale PDF temp files (older than {PDF_TEMP_CLEANUP_HOURS}h)"
+                            )
+                            JANITOR_LAST_ACTION = f"cleanup_tmp cleaned={cleaned_count}"
+                    except Exception as e:
+                        logger.warning(f"Failed to cleanup stale PDF files: {e}")
+                    last_cleanup_time = now
+
+                for sig in list(COLD_POOL.keys()):
+                    if now - LAST_USED.get(sig, now) > cold_ttl:
+                        crawler = COLD_POOL[sig]
+                        if not hasattr(crawler, 'active_requests') or crawler.active_requests == 0:
+                            logger.info(f"🧹 Closing cold browser (idle, sig={sig[:8]})")
+                            JANITOR_LAST_ACTION = f"close_cold sig={sig[:8]}"
                             with suppress(Exception):
                                 await crawler.close()
-                            
-                            pool.pop(sig, None)
+                            COLD_POOL.pop(sig, None)
                             LAST_USED.pop(sig, None)
                             USAGE_COUNT.pop(sig, None)
                             LAST_IDLE.pop(sig, None)
-                            
-                            # If it was in HOT/COLD, maybe we should move to RETIRED? 
-                            # But if it's leaked, better just kill it to free memory ASAP.
 
-            # [Stale File Cleanup] Every 30 minutes
-            if now - last_cleanup_time >= 1800:
-                try:
-                    import glob
-                    from pathlib import Path
-                    tmp_files = glob.glob("/tmp/tmp*.pdf")
-                    cleaned_count = 0
-                    cutoff = now - (PDF_TEMP_CLEANUP_HOURS * 3600)
-                    for f in tmp_files:
-                        if os.path.getmtime(f) < cutoff:
-                            os.remove(f)
-                            cleaned_count += 1
-                    if cleaned_count > 0:
-                        logger.info(f"🧹 Janitor: Cleaned {cleaned_count} stale PDF temp files (older than {PDF_TEMP_CLEANUP_HOURS}h)")
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup stale PDF files: {e}")
-                last_cleanup_time = now
+                for sig in list(HOT_POOL.keys()):
+                    if now - LAST_USED.get(sig, now) > hot_ttl:
+                        crawler = HOT_POOL[sig]
+                        if not hasattr(crawler, 'active_requests') or crawler.active_requests == 0:
+                            logger.info(f"🧹 Closing hot browser (idle={now - LAST_USED[sig]:.0f}s, sig={sig[:8]})")
+                            JANITOR_LAST_ACTION = f"close_hot sig={sig[:8]}"
+                            with suppress(Exception):
+                                await crawler.close()
+                            HOT_POOL.pop(sig, None)
+                            LAST_USED.pop(sig, None)
+                            USAGE_COUNT.pop(sig, None)
+                            LAST_IDLE.pop(sig, None)
 
-            # Clean cold pool
-            for sig in list(COLD_POOL.keys()):
-                if now - LAST_USED.get(sig, now) > cold_ttl:
-                    crawler = COLD_POOL[sig]
-                    if not hasattr(crawler, 'active_requests') or crawler.active_requests == 0:
-                        logger.info(f"🧹 Closing cold browser (idle, sig={sig[:8]})")
+                for sig in list(RETIRED_POOL.keys()):
+                    crawler = RETIRED_POOL[sig]
+                    last_used = LAST_USED.get(sig, now)
+                    retired_age = now - last_used
+                    is_idle = hasattr(crawler, 'active_requests') and crawler.active_requests == 0
+                    force_stuck = retired_age > RETIRED_FORCE_CLOSE_SEC
+                    if is_idle or force_stuck:
+                        reason = "idle" if is_idle else f"stuck {retired_age:.0f}s"
+                        logger.info(f"💀 Janitor closing retired browser (sig={sig[:8]}, {reason})")
+                        JANITOR_LAST_ACTION = f"close_retired sig={sig[:8]} reason={reason}"
                         with suppress(Exception):
                             await crawler.close()
-                        COLD_POOL.pop(sig, None)
-                        LAST_USED.pop(sig, None)
-                        USAGE_COUNT.pop(sig, None)
-                        LAST_IDLE.pop(sig, None)
+                        RETIRED_POOL.pop(sig, None)
+                        # Keep shared per-sig metadata if a live hot/cold browser with the
+                        # same signature still exists; otherwise hot idle TTL can no longer
+                        # advance and the browser may never be collected.
+                        if sig not in HOT_POOL and sig not in COLD_POOL:
+                            LAST_USED.pop(sig, None)
+                            USAGE_COUNT.pop(sig, None)
+                            LAST_IDLE.pop(sig, None)
+                        gc.collect()
 
-            # Clean hot pool
-            for sig in list(HOT_POOL.keys()):
-                if now - LAST_USED.get(sig, now) > hot_ttl:
-                    crawler = HOT_POOL[sig]
-                    if not hasattr(crawler, 'active_requests') or crawler.active_requests == 0:
-                        logger.info(f"🧹 Closing hot browser (idle={now - LAST_USED[sig]:.0f}s, sig={sig[:8]})")
-                        with suppress(Exception):
-                            await crawler.close()
-                        HOT_POOL.pop(sig, None)
-                        LAST_USED.pop(sig, None)
-                        USAGE_COUNT.pop(sig, None)
-                        LAST_IDLE.pop(sig, None)
-            
-            # Clean retired pool
-            for sig in list(RETIRED_POOL.keys()):
-                crawler = RETIRED_POOL[sig]
-                if hasattr(crawler, 'active_requests') and crawler.active_requests == 0:
-                    logger.info(f"💀 Janitor closing retired browser (sig={sig[:8]})")
-                    with suppress(Exception):
-                        await crawler.close()
-                    RETIRED_POOL.pop(sig, None)
-                    LAST_IDLE.pop(sig, None)
-
-            if mem_pct > 60 or len(RETIRED_POOL) > 0:
-                logger.info(f"📊 Pool: hot={len(HOT_POOL)}, cold={len(COLD_POOL)}, retired={len(RETIRED_POOL)}, mem={mem_pct:.1f}%")
+                if mem_pct > 60 or len(RETIRED_POOL) > 0:
+                    logger.info(f"📊 Pool: hot={len(HOT_POOL)}, cold={len(COLD_POOL)}, retired={len(RETIRED_POOL)}, mem={mem_pct:.1f}%")
+        except asyncio.CancelledError:
+            JANITOR_RUNNING = False
+            JANITOR_LAST_ACTION = "cancelled"
+            raise
+        except Exception as e:
+            JANITOR_LAST_TICK = time.time()
+            JANITOR_LOOP_COUNT += 1
+            JANITOR_LAST_ACTION = "error"
+            JANITOR_LAST_ERROR = repr(e)
+            logger.error(f"Janitor loop error: {e}", exc_info=True)
+            await asyncio.sleep(1)
