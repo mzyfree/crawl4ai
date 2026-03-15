@@ -14,11 +14,12 @@ WORKDIR /app
 # Overlay our modified crawler_pool
 COPY deploy/docker/crawler_pool.py /app/crawler_pool.py
 COPY deploy/docker/monitor.py /app/monitor.py
+COPY deploy/docker/monitor_routes.py /app/monitor_routes.py
 COPY crawl4ai/browser_manager.py /tmp/browser_manager.py
 
 USER root
 RUN python3 -c "import crawl4ai, pathlib, shutil; base = pathlib.Path(crawl4ai.__file__).parent; shutil.copy('/tmp/browser_manager.py', base / 'browser_manager.py'); print(f'patched: {base / \"browser_manager.py\"}')" && \
-    chown appuser:appuser /app/crawler_pool.py /app/monitor.py
+    chown appuser:appuser /app/crawler_pool.py /app/monitor.py /app/monitor_routes.py
 USER appuser
 
 EXPOSE 11235 6379

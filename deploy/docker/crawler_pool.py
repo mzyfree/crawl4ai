@@ -25,6 +25,8 @@ MEM_LIMIT = CONFIG.get("crawler", {}).get("memory_threshold_percent", 95.0)
 BASE_IDLE_TTL = CONFIG.get("crawler", {}).get("pool", {}).get("idle_ttl_sec", 300)
 LEAK_DETECTION_THRESHOLD = int(os.getenv("CRAWL4AI_LEAK_DETECTION_THRESHOLD_SEC", "14400")) # 4 hours
 RETIRED_FORCE_CLOSE_SEC = int(os.getenv("CRAWL4AI_RETIRED_FORCE_CLOSE_SEC", "300"))
+EMPTY_POOL_PROCESS_SWEEP_ENABLED = os.getenv("CRAWL4AI_EMPTY_POOL_PROCESS_SWEEP_ENABLED", "true").lower() == "true"
+EMPTY_POOL_PROCESS_SWEEP_IDLE_SEC = int(os.getenv("CRAWL4AI_EMPTY_POOL_PROCESS_SWEEP_IDLE_SEC", "120"))
 DEFAULT_CONFIG_SIG = None  # Cached sig for default config
 
 # Retirement Config (from env)
@@ -55,6 +57,7 @@ POOL_TOTAL_RELEASED = 0
 POOL_ACTIVE_BORROWS = 0
 POOL_SEQ = 0
 POOL_CRAWLER_ACTIVE: Dict[int, int] = {}
+POOL_FULLY_IDLE_SINCE: float = 0.0
 JANITOR_LAST_TICK = 0.0
 JANITOR_LOOP_COUNT = 0
 JANITOR_LAST_ACTION = "never"
@@ -100,6 +103,122 @@ def _pool_lifecycle_log(event: str, sig: str, crawler: Optional[AsyncWebCrawler]
             POOL_TOTAL_ACQUIRED,
             POOL_TOTAL_RELEASED,
         )
+
+
+def _scan_empty_pool_residual_processes():
+    """Find residual Playwright driver / chromium processes when pool is fully idle."""
+    profiles = {}
+    drivers = []
+
+    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline", "status", "memory_info", "create_time"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+            cmdline_str = " ".join(cmdline)
+            name = (proc.info.get("name") or "").lower()
+            rss = getattr(proc.info.get("memory_info"), "rss", 0) or 0
+            age = max(0.0, time.time() - (proc.info.get("create_time") or time.time()))
+
+            if "playwright/driver/package/cli.js run-driver" in cmdline_str:
+                drivers.append(
+                    {
+                        "pid": proc.info["pid"],
+                        "ppid": proc.info.get("ppid"),
+                        "name": proc.info.get("name"),
+                        "rss": rss,
+                        "age": age,
+                        "cmdline": cmdline_str,
+                    }
+                )
+
+            if ("chrome" not in name and "chromium" not in name) or "--user-data-dir=" not in cmdline_str:
+                continue
+
+            marker = "--user-data-dir="
+            start = cmdline_str.find(marker)
+            if start == -1:
+                continue
+            rest = cmdline_str[start + len(marker):]
+            user_data_dir = rest.split(" ", 1)[0]
+            if "playwright_chromiumdev_profile-" not in user_data_dir:
+                continue
+
+            profiles.setdefault(
+                user_data_dir,
+                {
+                    "user_data_dir": user_data_dir,
+                    "processes": [],
+                    "rss": 0,
+                    "max_age": 0.0,
+                },
+            )
+            profiles[user_data_dir]["processes"].append(
+                {
+                    "pid": proc.info["pid"],
+                    "ppid": proc.info.get("ppid"),
+                    "name": proc.info.get("name"),
+                    "rss": rss,
+                    "age": age,
+                    "cmdline": cmdline_str,
+                }
+            )
+            profiles[user_data_dir]["rss"] += rss
+            profiles[user_data_dir]["max_age"] = max(profiles[user_data_dir]["max_age"], age)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception:
+            continue
+
+    return profiles, drivers
+
+
+async def _sweep_empty_pool_residual_processes(idle_for: float):
+    """Best-effort residual process cleanup when pool has been fully idle for a while."""
+    profiles, drivers = _scan_empty_pool_residual_processes()
+    if not profiles and not drivers:
+        return 0, 0, 0
+
+    profile_count = len(profiles)
+    driver_count = len(drivers)
+    rss_mb = sum(profile["rss"] for profile in profiles.values()) / (1024 * 1024)
+    logger.warning(
+        "🧹 Empty-pool sweep triggered: idle_for=%.0fs profiles=%s drivers=%s rss_mb=%.1f",
+        idle_for,
+        profile_count,
+        driver_count,
+        rss_mb,
+    )
+
+    killed = 0
+    candidates = []
+    for profile in profiles.values():
+        candidates.extend(profile["processes"])
+    candidates.extend(drivers)
+    candidates.sort(key=lambda item: item["age"], reverse=True)
+
+    for item in candidates:
+        try:
+            proc = psutil.Process(item["pid"])
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception as e:
+            logger.warning("Failed to terminate residual process pid=%s error=%s", item["pid"], e)
+            continue
+
+    await asyncio.sleep(2)
+
+    for item in candidates:
+        try:
+            proc = psutil.Process(item["pid"])
+            if proc.is_running():
+                proc.kill()
+                killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception as e:
+            logger.warning("Failed to kill residual process pid=%s error=%s", item["pid"], e)
+
+    return profile_count, driver_count, killed
 
 
 def _sig(cfg: BrowserConfig) -> str:
@@ -230,7 +349,7 @@ async def get_crawler(cfg: BrowserConfig) -> AsyncWebCrawler:
 
 async def release_crawler(crawler: AsyncWebCrawler):
     """Decrement active request count for a crawler."""
-    global POOL_TOTAL_RELEASED, POOL_ACTIVE_BORROWS
+    global POOL_TOTAL_RELEASED, POOL_ACTIVE_BORROWS, POOL_FULLY_IDLE_SINCE
     async with LOCK:
         pool_sig = None
         crawler_id = id(crawler)
@@ -258,6 +377,8 @@ async def release_crawler(crawler: AsyncWebCrawler):
             # Lifecycle accounting (always attempt to keep counters consistent)
             POOL_TOTAL_RELEASED += 1
             POOL_ACTIVE_BORROWS = max(0, POOL_ACTIVE_BORROWS - 1)
+            if POOL_ACTIVE_BORROWS == 0:
+                POOL_FULLY_IDLE_SINCE = time.time()
             current = POOL_CRAWLER_ACTIVE.get(crawler_id, 0)
             if current <= 1:
                 POOL_CRAWLER_ACTIVE.pop(crawler_id, None)
@@ -304,9 +425,10 @@ async def close_all():
 
 async def janitor():
     """Adaptive cleanup based on memory pressure."""
-    global JANITOR_LAST_TICK, JANITOR_LOOP_COUNT, JANITOR_LAST_ACTION, JANITOR_LAST_ERROR, JANITOR_RUNNING
+    global JANITOR_LAST_TICK, JANITOR_LOOP_COUNT, JANITOR_LAST_ACTION, JANITOR_LAST_ERROR, JANITOR_RUNNING, POOL_FULLY_IDLE_SINCE
     last_audit_time = 0
     last_cleanup_time = 0
+    last_empty_pool_sweep_time = 0.0
     JANITOR_RUNNING = True
     JANITOR_LAST_ACTION = "started"
     while True:
@@ -439,6 +561,29 @@ async def janitor():
 
                 if mem_pct > 60 or len(RETIRED_POOL) > 0:
                     logger.info(f"📊 Pool: hot={len(HOT_POOL)}, cold={len(COLD_POOL)}, retired={len(RETIRED_POOL)}, mem={mem_pct:.1f}%")
+
+                pool_empty = not HOT_POOL and not COLD_POOL and not RETIRED_POOL
+                if POOL_ACTIVE_BORROWS > 0:
+                    POOL_FULLY_IDLE_SINCE = 0.0
+                elif pool_empty and POOL_FULLY_IDLE_SINCE == 0.0:
+                    POOL_FULLY_IDLE_SINCE = now
+
+                if (
+                    EMPTY_POOL_PROCESS_SWEEP_ENABLED
+                    and pool_empty
+                    and POOL_ACTIVE_BORROWS == 0
+                    and POOL_FULLY_IDLE_SINCE > 0
+                    and now - POOL_FULLY_IDLE_SINCE >= EMPTY_POOL_PROCESS_SWEEP_IDLE_SEC
+                    and now - last_empty_pool_sweep_time >= EMPTY_POOL_PROCESS_SWEEP_IDLE_SEC
+                ):
+                    profile_count, driver_count, killed = await _sweep_empty_pool_residual_processes(
+                        now - POOL_FULLY_IDLE_SINCE
+                    )
+                    last_empty_pool_sweep_time = now
+                    if profile_count or driver_count or killed:
+                        JANITOR_LAST_ACTION = (
+                            f"empty_pool_sweep profiles={profile_count} drivers={driver_count} killed={killed}"
+                        )
         except asyncio.CancelledError:
             JANITOR_RUNNING = False
             JANITOR_LAST_ACTION = "cancelled"

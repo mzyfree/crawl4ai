@@ -394,45 +394,77 @@ class ManagedBrowser:
 
         if self.browser_process:
             try:
+                proc = self.browser_process
                 # For builtin browsers that should persist, we should check if it's a detached process
                 # Only terminate if we have proper control over the process
-                if not self.browser_process.poll():
+                if proc.poll() is None:
                     # Process is still running
-                    self.browser_process.terminate()
+                    if sys.platform != "win32":
+                        # Kill the full process group on Unix so renderer / utility / gpu children
+                        # don't outlive the managed browser object.
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        except Exception:
+                            proc.terminate()
+                    else:
+                        proc.terminate()
                     # Wait for process to end gracefully
                     for _ in range(10):  # 10 attempts, 100ms each
-                        if self.browser_process.poll() is not None:
+                        if proc.poll() is not None:
                             break
                         await asyncio.sleep(0.1)
 
                     # Force kill if still running
-                    if self.browser_process.poll() is None:
+                    if proc.poll() is None:
                         if sys.platform == "win32":
                             # On Windows we might need taskkill for detached processes
                             try:
-                                subprocess.run(["taskkill", "/F", "/PID", str(self.browser_process.pid)])
+                                subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)])
                             except Exception:
-                                self.browser_process.kill()
+                                proc.kill()
                         else:
-                            self.browser_process.kill()
+                            try:
+                                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                            except Exception:
+                                proc.kill()
                         await asyncio.sleep(0.1)  # Brief wait for kill to take effect
 
             except Exception as e:
-                self.logger.error(
-                    message="Error terminating browser: {error}",
-                    tag="ERROR", 
-                    params={"error": str(e)},
-                )
+                if self.logger:
+                    self.logger.error(
+                        message="Error terminating browser: {error}",
+                        tag="ERROR", 
+                        params={"error": str(e)},
+                    )
+
+        # Best-effort fallback: clean up any chromium processes still tied to this user-data-dir.
+        if self.user_data_dir:
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    cmdline = " ".join(proc.info.get("cmdline") or [])
+                    name = (proc.info.get("name") or "").lower()
+                    if "chrome" not in name and "chromium" not in name:
+                        continue
+                    if f"--user-data-dir={self.user_data_dir}" not in cmdline:
+                        continue
+                    if self.browser_process and proc.pid == self.browser_process.pid:
+                        continue
+                    proc.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+                except Exception:
+                    continue
 
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir)
             except Exception as e:
-                self.logger.error(
-                    message="Error removing temporary directory: {error}",
-                    tag="ERROR",
-                    params={"error": str(e)},
-                )
+                if self.logger:
+                    self.logger.error(
+                        message="Error removing temporary directory: {error}",
+                        tag="ERROR",
+                        params={"error": str(e)},
+                    )
                 
     # These methods have been moved to BrowserProfiler class
     @staticmethod
@@ -1253,10 +1285,44 @@ class BrowserManager:
         """
         if session_id in self.sessions:
             context, page, _ = self.sessions[session_id]
-            await page.close()
+            page_error = None
+            context_error = None
+
+            try:
+                await page.close()
+            except Exception as e:
+                page_error = e
+                if self.logger:
+                    self.logger.error(
+                        message="Error closing session page: sid={session_id} error={error}",
+                        tag="ERROR",
+                        params={"session_id": session_id, "error": str(e)},
+                    )
+
             if not self.config.use_managed_browser:
-                await context.close()
+                try:
+                    await context.close()
+                except Exception as e:
+                    context_error = e
+                    if self.logger:
+                        self.logger.error(
+                            message="Error closing session context: sid={session_id} error={error}",
+                            tag="ERROR",
+                            params={"session_id": session_id, "error": str(e)},
+                        )
+
             del self.sessions[session_id]
+
+            if self.logger and (page_error or context_error):
+                self.logger.warning(
+                    message="Session cleanup completed with errors: sid={session_id} page_error={page_error} context_error={context_error}",
+                    tag="BROWSER",
+                    params={
+                        "session_id": session_id,
+                        "page_error": str(page_error) if page_error else "",
+                        "context_error": str(context_error) if context_error else "",
+                    },
+                )
 
     def _cleanup_expired_sessions(self):
         """Clean up expired sessions based on TTL."""
@@ -1313,31 +1379,89 @@ class BrowserManager:
         if self.config.sleep_on_close:
             await asyncio.sleep(0.5)
 
+        if self.logger:
+            self.logger.info(
+                message="BrowserManager.close start: sessions={sessions} contexts={contexts} has_browser={has_browser} has_managed_browser={has_managed_browser} has_playwright={has_playwright}",
+                tag="BROWSER",
+                params={
+                    "sessions": len(self.sessions),
+                    "contexts": len(self.contexts_by_config),
+                    "has_browser": bool(self.browser),
+                    "has_managed_browser": bool(self.managed_browser),
+                    "has_playwright": bool(self.playwright),
+                },
+            )
+
         session_ids = list(self.sessions.keys())
         for session_id in session_ids:
-            await self.kill_session(session_id)
+            try:
+                await self.kill_session(session_id)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        message="Unexpected error during session cleanup: sid={session_id} error={error}",
+                        tag="ERROR",
+                        params={"session_id": session_id, "error": str(e)},
+                    )
 
         # Now close all contexts we created. This reclaims memory from ephemeral contexts.
         for ctx in self.contexts_by_config.values():
             try:
                 await ctx.close()
             except Exception as e:
-                self.logger.error(
-                    message="Error closing context: {error}",
-                    tag="ERROR",
-                    params={"error": str(e)}
-                )
+                if self.logger:
+                    self.logger.error(
+                        message="Error closing context: {error}",
+                        tag="ERROR",
+                        params={"error": str(e)}
+                    )
         self.contexts_by_config.clear()
 
         if self.browser:
-            await self.browser.close()
+            try:
+                await self.browser.close()
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        message="Error closing browser: {error}",
+                        tag="ERROR",
+                        params={"error": str(e)}
+                    )
             self.browser = None
 
         if self.managed_browser:
-            await asyncio.sleep(0.5)
-            await self.managed_browser.cleanup()
-            self.managed_browser = None
+            try:
+                await self.managed_browser.cleanup()
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        message="Error cleaning up managed browser: {error}",
+                        tag="ERROR",
+                        params={"error": str(e)}
+                    )
 
         if self.playwright:
-            await self.playwright.stop()
+            try:
+                await self.playwright.stop()
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        message="Error stopping Playwright: {error}",
+                        tag="ERROR",
+                        params={"error": str(e)}
+                    )
             self.playwright = None
+        self.managed_browser = None
+
+        if self.logger:
+            self.logger.info(
+                message="BrowserManager.close complete: sessions={sessions} contexts={contexts} has_browser={has_browser} has_managed_browser={has_managed_browser} has_playwright={has_playwright}",
+                tag="BROWSER",
+                params={
+                    "sessions": len(self.sessions),
+                    "contexts": len(self.contexts_by_config),
+                    "has_browser": bool(self.browser),
+                    "has_managed_browser": bool(self.managed_browser),
+                    "has_playwright": bool(self.playwright),
+                },
+            )

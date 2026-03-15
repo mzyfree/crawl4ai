@@ -147,6 +147,20 @@ async def get_errors_log(limit: int = 100):
         raise HTTPException(500, str(e))
 
 
+@router.get("/runtime")
+async def get_runtime(top_n: int = 15):
+    """Get cgroup memory and top process details for live debugging."""
+    if top_n < 1 or top_n > 50:
+        raise HTTPException(400, f"Invalid top_n: {top_n}. Must be between 1 and 50")
+
+    try:
+        monitor = get_monitor()
+        return monitor.get_runtime_snapshot(top_n=top_n)
+    except Exception as e:
+        logger.error(f"Error getting runtime snapshot: {e}")
+        raise HTTPException(500, str(e))
+
+
 # ========== Control Actions ==========
 
 class KillBrowserRequest(BaseModel):

@@ -5,12 +5,112 @@ import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from collections import deque
+from pathlib import Path
 from redis import asyncio as aioredis
 from utils import get_container_memory_percent
 import psutil
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _read_cgroup_text(path: str) -> Optional[str]:
+    try:
+        p = Path(path)
+        if p.exists():
+            return p.read_text().strip()
+    except Exception:
+        return None
+    return None
+
+
+def _read_cgroup_memory_snapshot() -> Dict:
+    """Return raw cgroup memory usage/limits and a compact memory.stat view."""
+    usage_txt = _read_cgroup_text("/sys/fs/cgroup/memory.current")
+    limit_txt = _read_cgroup_text("/sys/fs/cgroup/memory.max")
+
+    if usage_txt is None:
+        usage_txt = _read_cgroup_text("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        limit_txt = _read_cgroup_text("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
+    usage_bytes = int(usage_txt) if usage_txt and usage_txt.isdigit() else None
+    if limit_txt == "max":
+        limit_bytes = None
+    elif limit_txt and limit_txt.isdigit():
+        limit_bytes = int(limit_txt)
+    else:
+        limit_bytes = None
+
+    stat_txt = _read_cgroup_text("/sys/fs/cgroup/memory.stat")
+    if stat_txt is None:
+        stat_txt = _read_cgroup_text("/sys/fs/cgroup/memory/memory.stat")
+
+    memory_stat = {}
+    if stat_txt:
+        for line in stat_txt.splitlines():
+            try:
+                key, value = line.split()
+                memory_stat[key] = int(value)
+            except ValueError:
+                continue
+
+    interesting_keys = [
+        "anon",
+        "file",
+        "kernel",
+        "kernel_stack",
+        "pagetables",
+        "slab",
+        "sock",
+        "shmem",
+        "inactive_anon",
+        "active_anon",
+        "inactive_file",
+        "active_file",
+    ]
+
+    return {
+        "usage_bytes": usage_bytes,
+        "usage_mb": round(usage_bytes / (1024 ** 2), 2) if usage_bytes is not None else None,
+        "limit_bytes": limit_bytes,
+        "limit_mb": round(limit_bytes / (1024 ** 2), 2) if limit_bytes else None,
+        "stat_bytes": {k: memory_stat.get(k) for k in interesting_keys if k in memory_stat},
+        "stat_mb": {
+            k: round(memory_stat[k] / (1024 ** 2), 2)
+            for k in interesting_keys
+            if k in memory_stat
+        },
+    }
+
+
+def _get_top_processes(limit: int = 15) -> List[Dict]:
+    """Return top processes in the container by RSS for live memory debugging."""
+    rows = []
+    now = time.time()
+    for proc in psutil.process_iter(
+        ["pid", "ppid", "name", "cmdline", "create_time", "memory_info", "status"]
+    ):
+        try:
+            info = proc.info
+            memory_info = info.get("memory_info")
+            rss = getattr(memory_info, "rss", 0) if memory_info else 0
+            cmdline = " ".join(info.get("cmdline") or [])
+            rows.append(
+                {
+                    "pid": info["pid"],
+                    "ppid": info["ppid"],
+                    "name": info.get("name") or "",
+                    "status": info.get("status") or "",
+                    "rss_mb": round(rss / (1024 ** 2), 2),
+                    "age_seconds": int(max(0, now - (info.get("create_time") or now))),
+                    "cmdline": cmdline[:240],
+                }
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    rows.sort(key=lambda item: item["rss_mb"], reverse=True)
+    return rows[:limit]
 
 class MonitorStats:
     """Tracks real-time server stats with Redis persistence."""
@@ -379,6 +479,18 @@ class MonitorStats:
     def get_errors_log(self, limit: int = 100) -> List[Dict]:
         """Get recent errors."""
         return list(self.errors)[-limit:]
+
+    def get_runtime_snapshot(self, top_n: int = 15) -> Dict:
+        """Return cgroup/process-level runtime memory details for debugging."""
+        top_n = max(1, min(top_n, 50))
+        cgroup_memory = _read_cgroup_memory_snapshot()
+        return {
+            "timestamp": time.time(),
+            "container_memory_percent": round(get_container_memory_percent(), 1),
+            "process_rss_mb": round(psutil.Process().memory_info().rss / (1024 ** 2), 2),
+            "cgroup_memory": cgroup_memory,
+            "top_processes": _get_top_processes(limit=top_n),
+        }
 
 # Global instance (initialized in server.py)
 monitor_stats: Optional[MonitorStats] = None
