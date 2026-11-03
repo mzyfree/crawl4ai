@@ -18,7 +18,10 @@ COPY deploy/docker/monitor_routes.py /app/monitor_routes.py
 COPY crawl4ai/browser_manager.py /tmp/browser_manager.py
 
 USER root
-RUN python3 -c "import crawl4ai, pathlib, shutil; base = pathlib.Path(crawl4ai.__file__).parent; shutil.copy('/tmp/browser_manager.py', base / 'browser_manager.py'); print(f'patched: {base / \"browser_manager.py\"}')" && \
+RUN python3 -m pip install --no-cache-dir --upgrade "pillow==13.0.0" && \
+    python3 -m pip check && \
+    python3 -c "from PIL import Image; import PIL; assert PIL.__version__ == '13.0.0'; print('Pillow', PIL.__version__)" && \
+    python3 -c "import crawl4ai, pathlib, shutil; base = pathlib.Path(crawl4ai.__file__).parent; shutil.copy('/tmp/browser_manager.py', base / 'browser_manager.py'); print(f'patched: {base / \"browser_manager.py\"}')" && \
     chown appuser:appuser /app/crawler_pool.py /app/monitor.py /app/monitor_routes.py
 USER appuser
 
